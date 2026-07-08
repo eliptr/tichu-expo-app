@@ -45,6 +45,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint": "expo lint",
+    "test:offline-bots": "node ./scripts/run-offline-bot-scenarios.js",
     "typecheck": "tsc --noEmit"
   },
   "private": true

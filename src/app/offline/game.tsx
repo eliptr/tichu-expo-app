@@ -1,6 +1,6 @@
 import { router } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 
 import { Button } from '@/components/button';
 import { Screen } from '@/components/screen';
@@ -14,8 +14,6 @@ import {
   createOfflineDeal,
   currentOfflineTrickPlays,
   currentOfflineWinningPlay,
-  offlineCapturedPointTotal,
-  offlineWonTrickCount,
   submitOfflinePass,
   submitOfflinePlay,
   visibleCardList,
@@ -24,12 +22,13 @@ import {
   type PassDirection,
 } from '@/features/offline/offline-game';
 
-const suitLabels: Record<NonNullable<TichuCard['suit']>, string> = {
-  jade: 'Jade',
-  pagoda: 'Pagoda',
-  star: 'Star',
-  sword: 'Sword',
+type MatchTargetScore = 500 | 1000 | 2000;
+type MatchScores = {
+  teamOne: number;
+  teamTwo: number;
 };
+type MatchWinner = 'team_one' | 'team_two';
+
 const suitSymbols: Record<NonNullable<TichuCard['suit']>, string> = {
   jade: '♣',
   pagoda: '♦',
@@ -37,8 +36,19 @@ const suitSymbols: Record<NonNullable<TichuCard['suit']>, string> = {
   sword: '♠',
 };
 
+const matchTargetScores: MatchTargetScore[] = [500, 1000, 2000];
+const emptyMatchScores: MatchScores = { teamOne: 0, teamTwo: 0 };
+const handCardOverlap = 8;
+const handGridLeftPadding = 10;
+const handGridColumns = 7;
+
 export default function OfflineBotGameScreen() {
+  const { width } = useWindowDimensions();
   const [deal, setDeal] = useState<OfflineDeal>(() => createOfflineDeal());
+  const [targetScore, setTargetScore] = useState<MatchTargetScore | null>(null);
+  const [matchScores, setMatchScores] = useState<MatchScores>(emptyMatchScores);
+  const [handNumber, setHandNumber] = useState(1);
+  const [scoredHandNumber, setScoredHandNumber] = useState(0);
   const [selectedCardIds, setSelectedCardIds] = useState<string[]>([]);
   const [activePassDirection, setActivePassDirection] = useState<PassDirection>('teammate');
   const [selectedPasses, setSelectedPasses] = useState<Record<PassDirection, string | null>>({
@@ -47,7 +57,6 @@ export default function OfflineBotGameScreen() {
     teammate: null,
   });
 
-  const handPoints = useMemo(() => deal.humanHand.reduce((sum, card) => sum + card.points, 0), [deal.humanHand]);
   const displayHand = useMemo(() => sortCardsForHandDisplay(deal.humanHand), [deal.humanHand]);
   const canPass = deal.status === 'dealt';
   const isFinished = deal.status === 'finished';
@@ -68,6 +77,22 @@ export default function OfflineBotGameScreen() {
     () => validatePlay(selectedPlayCards, currentWinningPlay?.combo ?? null),
     [currentWinningPlay?.combo, selectedPlayCards]
   );
+  const matchWinner = useMemo(() => getMatchWinner(matchScores, targetScore), [matchScores, targetScore]);
+  const handCardWidth = useMemo(() => {
+    const screenPadding = spacing.md * 2;
+    const availableWidth = width - screenPadding - handGridLeftPadding;
+    const overlappedWidth = (availableWidth + handCardOverlap * (handGridColumns - 1)) / handGridColumns;
+
+    return Math.min(64, Math.max(46, overlappedWidth));
+  }, [width]);
+  const handCardStyle = useMemo(
+    () => ({
+      height: handCardWidth * 1.42,
+      marginRight: -handCardOverlap,
+      width: handCardWidth,
+    }),
+    [handCardWidth]
+  );
 
   useEffect(() => {
     if (!deal.turnState || deal.status !== 'playing' || deal.turnState.currentSeat === deal.humanSeat) {
@@ -81,10 +106,51 @@ export default function OfflineBotGameScreen() {
     return () => clearTimeout(timeoutId);
   }, [deal.humanSeat, deal.status, deal.turnState]);
 
-  function handleNewDeal() {
+  useEffect(() => {
+    if (!targetScore || deal.status !== 'finished' || !deal.scoreSummary || scoredHandNumber === handNumber) {
+      return;
+    }
+
+    const scoreSummary = deal.scoreSummary;
+
+    setMatchScores((current) => ({
+      teamOne: current.teamOne + scoreSummary.teamOneScore,
+      teamTwo: current.teamTwo + scoreSummary.teamTwoScore,
+    }));
+    setScoredHandNumber(handNumber);
+  }, [deal.scoreSummary, deal.status, handNumber, scoredHandNumber, targetScore]);
+
+  function resetSelections() {
     setSelectedCardIds([]);
     setActivePassDirection('teammate');
     setSelectedPasses({ left: null, right: null, teammate: null });
+  }
+
+  function handleStartMatch(selectedTargetScore: MatchTargetScore) {
+    resetSelections();
+    setTargetScore(selectedTargetScore);
+    setMatchScores(emptyMatchScores);
+    setHandNumber(1);
+    setScoredHandNumber(0);
+    setDeal(createOfflineDeal());
+  }
+
+  function handleNextHand() {
+    if (matchWinner) {
+      return;
+    }
+
+    resetSelections();
+    setHandNumber((current) => current + 1);
+    setDeal(createOfflineDeal());
+  }
+
+  function handleNewMatch() {
+    resetSelections();
+    setTargetScore(null);
+    setMatchScores(emptyMatchScores);
+    setHandNumber(1);
+    setScoredHandNumber(0);
     setDeal(createOfflineDeal());
   }
 
@@ -149,23 +215,65 @@ export default function OfflineBotGameScreen() {
     setSelectedCardIds([]);
   }
 
+  if (!targetScore) {
+    return (
+      <Screen compact>
+        <View style={styles.matchStartPanel}>
+          <Text style={styles.matchStartTitle}>Choose match length</Text>
+          <View style={styles.targetOptions}>
+            {matchTargetScores.map((score) => (
+              <Pressable
+                accessibilityRole="button"
+                key={score}
+                onPress={() => handleStartMatch(score)}
+                style={({ pressed }) => [styles.targetOption, pressed && styles.pressed]}>
+                <Text style={styles.targetOptionValue}>{score}</Text>
+                <Text style={styles.targetOptionLabel}>points</Text>
+              </Pressable>
+            ))}
+          </View>
+          <Button label="Dashboard" onPress={() => router.back()} variant="secondary" />
+        </View>
+      </Screen>
+    );
+  }
+
   return (
-    <Screen>
+    <Screen compact>
       <View style={styles.header}>
         <Text style={styles.eyebrow}>Offline bots</Text>
-        <Text style={styles.title}>Bot table</Text>
-        <Text style={styles.subtitle}>Local-only prototype. Deal a hand and inspect the first bot-game table without touching Supabase.</Text>
       </View>
-
+      <View style={styles.matchScorePanel}>
+        <View style={styles.matchScoreHeader}>
+          <Text style={styles.matchScoreTitle}>Hand {handNumber}</Text>
+          <View style={styles.matchScoreHeaderActions}>
+            <Text style={styles.matchScoreTarget}>To {targetScore}</Text>
+            <Pressable accessibilityRole="button" onPress={handleNewMatch} style={({ pressed }) => [styles.compactAction, pressed && styles.pressed]}>
+              <Text style={styles.compactActionText}>New</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" onPress={() => router.back()} style={({ pressed }) => [styles.compactAction, pressed && styles.pressed]}>
+              <Text style={styles.compactActionText}>Exit</Text>
+            </Pressable>
+          </View>
+        </View>
+        <View style={styles.matchScoreRows}>
+          <View style={[styles.matchScoreTeam, matchWinner === 'team_one' && styles.matchWinnerTeam]}>
+            <Text style={styles.matchScoreName}>You</Text>
+            <Text style={styles.matchScoreValue}>{matchScores.teamOne}</Text>
+          </View>
+          <Text style={styles.matchScoreDivider}>-</Text>
+          <View style={[styles.matchScoreTeam, matchWinner === 'team_two' && styles.matchWinnerTeam]}>
+            <Text style={styles.matchScoreName}>Bots</Text>
+            <Text style={styles.matchScoreValue}>{matchScores.teamTwo}</Text>
+          </View>
+        </View>
+      </View>
       <View style={styles.tablePanel}>
         <View style={styles.playerRow}>
           {deal.botPlayers.map((bot) => (
             <View key={bot.seat} style={styles.playerTile}>
               <Text style={styles.playerName}>{bot.name}</Text>
               <Text style={styles.playerMeta}>{bot.cardCount} cards</Text>
-              <Text style={styles.playerMeta}>
-                {offlineWonTrickCount(deal, bot.seat)} tricks - {offlineCapturedPointTotal(deal, bot.seat)} pts
-              </Text>
               <Text style={styles.botCards}>{visibleCardList(deal.hands[bot.seat])}</Text>
             </View>
           ))}
@@ -173,21 +281,7 @@ export default function OfflineBotGameScreen() {
 
         <View style={styles.humanSeat}>
           <Text style={styles.humanPlayerName}>You</Text>
-          <Text style={styles.humanPlayerMeta}>
-            {deal.humanHand.length} cards - {handPoints} points
-          </Text>
-          <Text style={styles.humanPlayerMeta}>
-            {offlineWonTrickCount(deal, deal.humanSeat)} tricks - {offlineCapturedPointTotal(deal, deal.humanSeat)} captured
-          </Text>
-        </View>
-      </View>
-
-      <View style={styles.actions}>
-        <View style={styles.action}>
-          <Button label="New deal" onPress={handleNewDeal} />
-        </View>
-        <View style={styles.action}>
-          <Button label="Dashboard" onPress={() => router.back()} variant="secondary" />
+          <Text style={styles.humanPlayerMeta}>{deal.humanHand.length} cards</Text>
         </View>
       </View>
 
@@ -292,6 +386,25 @@ export default function OfflineBotGameScreen() {
                 </View>
               ))}
             </View>
+            {matchWinner ? (
+              <View style={styles.matchCompletePanel}>
+                <Text style={styles.matchCompleteTitle}>{matchWinner === 'team_one' ? 'You win the match' : 'Bots win the match'}</Text>
+                <View style={styles.turnActions}>
+                  <View style={styles.turnAction}>
+                    <Button label="New match" onPress={handleNewMatch} />
+                  </View>
+                  <View style={styles.turnAction}>
+                    <Button label="Dashboard" onPress={() => router.back()} variant="secondary" />
+                  </View>
+                </View>
+              </View>
+            ) : (
+              <Button
+                disabled={scoredHandNumber !== handNumber}
+                label={scoredHandNumber === handNumber ? 'Next hand' : 'Saving score'}
+                onPress={handleNextHand}
+              />
+            )}
           </>
         ) : (
           <>
@@ -318,13 +431,9 @@ export default function OfflineBotGameScreen() {
               <>
                 <View style={styles.comboPreview}>
                   <Text style={styles.comboLabel}>{playValidation.valid ? playValidation.label : 'Invalid selection'}</Text>
-                  <Text style={styles.comboMeta}>
-                    {selectedCardIds.length === 0
-                      ? 'Select cards from your hand.'
-                      : playValidation.valid
-                        ? 'Local validator says this can be played.'
-                        : playValidation.reason}
-                  </Text>
+                  {selectedCardIds.length > 0 ? (
+                    <Text style={styles.comboMeta}>{playValidation.valid ? 'Ready to play.' : playValidation.reason}</Text>
+                  ) : null}
                 </View>
                 <View style={styles.turnActions}>
                   <View style={styles.turnAction}>
@@ -349,28 +458,17 @@ export default function OfflineBotGameScreen() {
         )}
       </View>
 
-      <View style={styles.handHeader}>
-        <Text style={styles.sectionTitle}>Your hand</Text>
-        <Text style={styles.selectionText}>
-          {canPass
-            ? selectedPassCount > 0
-              ? `${selectedPassCount}/3 to pass`
-              : `Tap cards for ${activePassDirection}`
-            : selectedCardIds.length > 0
-              ? `${selectedCardIds.length} selected`
-              : 'Tap cards to select'}
-        </Text>
-      </View>
+      <Text style={styles.sectionTitle}>Your hand</Text>
 
       <View style={styles.cardGrid}>
         {displayHand.map((card) => (
           <CardTile
             card={card}
+            cardStyle={handCardStyle}
             isSelected={canPass ? Boolean(getSelectedPassLabel(selectedPasses, card.id)) : selectedCardIds.includes(card.id)}
             key={card.id}
             onPress={() => handleSelectCard(card.id)}
             selectionLabel={canPass ? getSelectedPassLabel(selectedPasses, card.id) : null}
-            tapHint={canPass ? `Tap for ${activePassDirection}` : isHumanTurn ? 'Tap to play' : isFinished ? 'Hand complete' : 'Waiting'}
           />
         ))}
       </View>
@@ -404,18 +502,41 @@ function getSelectedPassLabel(selectedPasses: Record<PassDirection, string | nul
   return selectedDirection ? `To ${selectedDirection.label}` : null;
 }
 
+function getMatchWinner(scores: MatchScores, targetScore: MatchTargetScore | null): MatchWinner | null {
+  if (!targetScore) {
+    return null;
+  }
+
+  const teamOneReached = scores.teamOne >= targetScore;
+  const teamTwoReached = scores.teamTwo >= targetScore;
+
+  if (teamOneReached && teamTwoReached) {
+    return scores.teamOne >= scores.teamTwo ? 'team_one' : 'team_two';
+  }
+
+  if (teamOneReached) {
+    return 'team_one';
+  }
+
+  if (teamTwoReached) {
+    return 'team_two';
+  }
+
+  return null;
+}
+
 function CardTile({
   card,
+  cardStyle,
   isSelected,
   onPress,
   selectionLabel,
-  tapHint,
 }: {
   card: TichuCard;
+  cardStyle: { height: number; marginRight: number; width: number };
   isSelected: boolean;
   onPress: () => void;
   selectionLabel: string | null;
-  tapHint: string;
 }) {
   const isSpecial = card.kind === 'special';
 
@@ -425,19 +546,20 @@ function CardTile({
       onPress={onPress}
       style={({ pressed }) => [
         styles.card,
+        cardStyle,
         isSpecial && styles.specialCard,
         isSelected && styles.selectedCard,
         pressed && styles.pressed,
       ]}>
       <View style={styles.cardTitleRow}>
-        <Text style={styles.cardRank}>{card.rank ?? card.label}</Text>
+        <Text adjustsFontSizeToFit numberOfLines={2} style={styles.cardRank}>
+          {card.rank ?? card.label}
+        </Text>
         {card.suit ? (
           <Text style={[styles.suitIcon, isRedSuit(card.suit) && styles.redSuit]}>{suitSymbols[card.suit]}</Text>
         ) : null}
       </View>
-      <Text style={styles.cardSuit}>{card.suit ? suitLabels[card.suit] : 'Special'}</Text>
-      {card.points !== 0 ? <Text style={styles.cardPoints}>{card.points > 0 ? `+${card.points}` : card.points}</Text> : null}
-      {selectionLabel ? <Text style={styles.passBadge}>{selectionLabel}</Text> : <Text style={styles.tapHint}>{tapHint}</Text>}
+      {selectionLabel ? <Text style={styles.passBadge}>{selectionLabel}</Text> : null}
     </Pressable>
   );
 }
@@ -454,13 +576,139 @@ const styles = StyleSheet.create({
   activePassTargetText: {
     color: colors.background,
   },
-  action: {
-    flex: 1,
+  compactAction: {
+    backgroundColor: colors.background,
+    borderColor: colors.border,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
   },
-  actions: {
-    flexDirection: 'row',
+  compactActionText: {
+    color: colors.muted,
+    fontSize: 11,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  matchCompletePanel: {
+    backgroundColor: colors.surface,
+    borderColor: colors.accent,
+    borderRadius: 8,
+    borderWidth: 1,
     gap: spacing.md,
-    marginBottom: spacing.lg,
+    padding: spacing.md,
+  },
+  matchCompleteTitle: {
+    color: colors.text,
+    fontSize: 16,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  matchScoreHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+    justifyContent: 'space-between',
+  },
+  matchScoreHeaderActions: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    flexShrink: 0,
+    gap: 5,
+  },
+  matchScoreName: {
+    color: colors.muted,
+    fontSize: 10,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  matchScorePanel: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: 5,
+    marginBottom: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 6,
+  },
+  matchScoreRows: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 4,
+  },
+  matchScoreDivider: {
+    color: colors.placeholder,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  matchScoreTarget: {
+    color: colors.accent,
+    fontSize: 10,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  matchScoreTeam: {
+    alignItems: 'center',
+    backgroundColor: 'transparent',
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 0,
+    flexDirection: 'row',
+    flex: 1,
+    gap: 5,
+    justifyContent: 'center',
+    paddingVertical: 1,
+  },
+  matchScoreTitle: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  matchScoreValue: {
+    color: colors.text,
+    fontSize: 19,
+    fontWeight: '900',
+  },
+  matchStartPanel: {
+    gap: spacing.lg,
+    paddingTop: spacing.xl,
+  },
+  matchStartTitle: {
+    color: colors.text,
+    fontSize: 24,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  matchWinnerTeam: {
+    backgroundColor: colors.accentSoft,
+    borderColor: colors.accent,
+    borderWidth: 1,
+  },
+  targetOption: {
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    flex: 1,
+    gap: 2,
+    padding: spacing.md,
+  },
+  targetOptionLabel: {
+    color: colors.muted,
+    fontSize: 11,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  targetOptions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  targetOptionValue: {
+    color: colors.accent,
+    fontSize: 22,
+    fontWeight: '900',
   },
   botCards: {
     color: colors.placeholder,
@@ -541,46 +789,40 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   card: {
-    backgroundColor: colors.surface,
-    borderColor: colors.border,
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E2E8F0',
     borderRadius: 8,
     borderWidth: 1,
-    flexBasis: '31%',
-    gap: 4,
-    minHeight: 96,
-    padding: spacing.md,
+    elevation: 4,
+    gap: 0,
+    justifyContent: 'flex-start',
+    marginBottom: 5,
+    paddingHorizontal: 7,
+    paddingVertical: 7,
+    shadowColor: '#0F172A',
+    shadowOffset: { height: 3, width: 0 },
+    shadowOpacity: 0.16,
+    shadowRadius: 5,
   },
   cardGrid: {
+    alignItems: 'flex-start',
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: spacing.sm,
-  },
-  cardPoints: {
-    color: colors.accent,
-    fontSize: 13,
-    fontWeight: '900',
+    marginRight: handCardOverlap,
+    paddingLeft: handGridLeftPadding,
+    rowGap: 0,
   },
   cardRank: {
     color: colors.text,
-    fontSize: 20,
-    fontWeight: '900',
-  },
-  cardSuit: {
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: '800',
-    textTransform: 'uppercase',
+    fontSize: 31,
+    fontWeight: '700',
+    lineHeight: 31,
+    textAlign: 'left',
   },
   cardTitleRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: spacing.sm,
-  },
-  eyebrow: {
-    color: colors.accent,
-    fontSize: 13,
-    fontWeight: '800',
-    textTransform: 'uppercase',
+    alignItems: 'flex-start',
+    gap: 2,
+    width: '100%',
   },
   finishList: {
     gap: spacing.sm,
@@ -607,31 +849,22 @@ const styles = StyleSheet.create({
     gap: spacing.md,
     padding: spacing.md,
   },
-  handHeader: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: spacing.md,
-  },
-  header: {
-    gap: spacing.sm,
-    marginBottom: spacing.lg,
-  },
   humanSeat: {
     alignItems: 'center',
     backgroundColor: colors.accent,
     borderRadius: 8,
-    gap: 4,
-    padding: spacing.md,
+    gap: 1,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 5,
   },
   humanPlayerMeta: {
     color: colors.accentSoft,
-    fontSize: 13,
+    fontSize: 11,
     fontWeight: '800',
   },
   humanPlayerName: {
     color: colors.background,
-    fontSize: 15,
+    fontSize: 13,
     fontWeight: '900',
   },
   comboLabel: {
@@ -653,17 +886,27 @@ const styles = StyleSheet.create({
     gap: 4,
     padding: spacing.md,
   },
+  header: {
+    gap: spacing.sm,
+    marginBottom: spacing.lg,
+  },
+  eyebrow: {
+    color: colors.accent,
+    fontSize: 13,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
   passBadge: {
     alignSelf: 'flex-start',
     backgroundColor: colors.accentSoft,
     borderRadius: 999,
     color: colors.accent,
-    fontSize: 11,
+    fontSize: 8,
     fontWeight: '900',
-    marginTop: spacing.sm,
+    marginTop: 1,
     overflow: 'hidden',
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 3,
+    paddingHorizontal: 3,
+    paddingVertical: 1,
   },
   passTarget: {
     backgroundColor: colors.surface,
@@ -692,17 +935,17 @@ const styles = StyleSheet.create({
   },
   playerMeta: {
     color: colors.muted,
-    fontSize: 13,
+    fontSize: 11,
     fontWeight: '800',
   },
   playerName: {
     color: colors.text,
-    fontSize: 15,
+    fontSize: 13,
     fontWeight: '900',
   },
   playerRow: {
     flexDirection: 'row',
-    gap: spacing.sm,
+    gap: 6,
   },
   playerTile: {
     alignItems: 'center',
@@ -711,9 +954,10 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     borderWidth: 1,
     flex: 1,
-    gap: 4,
-    minHeight: 110,
-    padding: spacing.md,
+    gap: 1,
+    minHeight: 58,
+    paddingHorizontal: 6,
+    paddingVertical: 5,
   },
   playCards: {
     color: colors.text,
@@ -750,8 +994,9 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {
     color: colors.text,
-    fontSize: 20,
+    fontSize: 17,
     fontWeight: '900',
+    marginBottom: spacing.sm,
   },
   scoreNote: {
     color: colors.muted,
@@ -784,20 +1029,19 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   selectedCard: {
+    backgroundColor: '#EFF6FF',
     borderColor: colors.accent,
     borderWidth: 2,
+    elevation: 7,
+    shadowOpacity: 0.22,
+    transform: [{ translateY: -3 }],
   },
   redSuit: {
     color: colors.danger,
   },
-  selectionText: {
-    color: colors.muted,
-    fontSize: 13,
-    fontWeight: '800',
-  },
   specialCard: {
     backgroundColor: '#FFFBEB',
-    borderColor: '#FCD34D',
+    borderColor: '#FBBF24',
   },
   statusPanel: {
     backgroundColor: '#F8FBFF',
@@ -805,8 +1049,8 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     borderWidth: 1,
     gap: spacing.sm,
-    marginBottom: spacing.lg,
-    padding: spacing.lg,
+    marginBottom: spacing.md,
+    padding: spacing.md,
   },
   statusText: {
     color: colors.muted,
@@ -821,34 +1065,18 @@ const styles = StyleSheet.create({
   },
   suitIcon: {
     color: colors.text,
-    fontSize: 19,
+    fontSize: 29,
     fontWeight: '900',
-  },
-  subtitle: {
-    color: colors.muted,
-    fontSize: 16,
-    lineHeight: 24,
+    lineHeight: 29,
   },
   tablePanel: {
     backgroundColor: '#ECFDF5',
     borderColor: '#A7F3D0',
     borderRadius: 8,
     borderWidth: 1,
-    gap: spacing.md,
-    marginBottom: spacing.lg,
-    padding: spacing.md,
-  },
-  tapHint: {
-    color: colors.placeholder,
-    fontSize: 11,
-    fontWeight: '800',
-    marginTop: spacing.sm,
-  },
-  title: {
-    color: colors.text,
-    fontSize: 34,
-    fontWeight: '800',
-    lineHeight: 40,
+    gap: 6,
+    marginBottom: spacing.sm,
+    padding: 6,
   },
   turnAction: {
     flex: 1,

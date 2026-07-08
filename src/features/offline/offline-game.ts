@@ -528,14 +528,14 @@ function scoreBotMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMo
   }
 
   if (containsCard(move, 'dragon')) {
-    score += remainingCards === 0 || currentTrickPoints >= 25 ? 35 : -95;
+    score += remainingCards === 0 || currentTrickPoints >= 25 ? 35 : -160;
   }
 
   if (containsCard(move, 'phoenix')) {
     score += remainingCards === 0 ? 45 : -55;
 
     if (move.cards.length === 1) {
-      score -= 35;
+      score += remainingCards === 0 ? 0 : -110;
     }
   }
 
