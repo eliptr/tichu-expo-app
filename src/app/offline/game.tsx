@@ -1,6 +1,6 @@
 import { router } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Animated, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 
 import { Button } from '@/components/button';
 import { Screen } from '@/components/screen';
@@ -18,6 +18,7 @@ import {
   submitOfflinePlay,
   visibleCardList,
   type OfflineDeal,
+  type OfflinePlay,
   type OfflineSeat,
   type PassDirection,
 } from '@/features/offline/offline-game';
@@ -73,6 +74,7 @@ export default function OfflineBotGameScreen() {
   );
   const currentWinningPlay = useMemo(() => currentOfflineWinningPlay(deal), [deal]);
   const currentTrickPlays = useMemo(() => currentOfflineTrickPlays(deal), [deal]);
+  const newestCurrentTrickPlays = useMemo(() => [...currentTrickPlays].reverse(), [currentTrickPlays]);
   const playValidation = useMemo(
     () => validatePlay(selectedPlayCards, currentWinningPlay?.combo ?? null),
     [currentWinningPlay?.combo, selectedPlayCards]
@@ -279,55 +281,19 @@ export default function OfflineBotGameScreen() {
           ))}
         </View>
 
-        <View style={styles.humanSeat}>
-          <Text style={styles.humanPlayerName}>You</Text>
-          <Text style={styles.humanPlayerMeta}>{deal.humanHand.length} cards</Text>
-        </View>
       </View>
-
-      {deal.botDiagnostics ? (
-        <View style={styles.botDiagnosticsPanel}>
-          <View style={styles.botDiagnosticsHeader}>
-            <Text style={styles.botDiagnosticsTitle}>Bot diagnostics</Text>
-            <Text style={styles.botDiagnosticsMeta}>
-              Trick {deal.botDiagnostics.trickNumber} - {seatName(deal.botDiagnostics.seat)}
-            </Text>
-          </View>
-          <Text style={styles.botDiagnosticsDecision}>
-            {deal.botDiagnostics.decision === 'play'
-              ? `Played ${deal.botDiagnostics.decisionLabel}`
-              : deal.botDiagnostics.decisionLabel}
-          </Text>
-          <Text style={styles.botDiagnosticsReason}>{deal.botDiagnostics.reason}</Text>
-          {deal.botDiagnostics.candidates.length > 0 ? (
-            <View style={styles.botCandidateList}>
-              {deal.botDiagnostics.candidates.map((candidate, index) => (
-                <View key={`${candidate.label}-${index}`} style={styles.botCandidateRow}>
-                  <Text style={styles.botCandidateRank}>#{index + 1}</Text>
-                  <Text style={styles.botCandidateLabel}>{candidate.label}</Text>
-                  <Text style={styles.botCandidateScore}>{candidate.score}</Text>
-                </View>
-              ))}
-            </View>
-          ) : (
-            <Text style={styles.botDiagnosticsReason}>No playable candidate survived validation.</Text>
-          )}
-        </View>
-      ) : null}
 
       <View style={styles.statusPanel}>
         <Text style={styles.statusTitle}>
           {canPass ? 'Pass cards' : isFinished ? 'Hand complete' : `Trick ${deal.turnState?.trickNumber ?? 1}`}
         </Text>
-        <Text style={styles.statusText}>
-          {canPass
-            ? 'Choose one card for your teammate, left opponent, and right opponent. Bots pass automatically.'
-            : isFinished
-              ? 'Three players are out. The hand score is ready.'
-              : isHumanTurn
-                ? 'Your turn. Select a legal play or pass if another player has led.'
-                : `Waiting for ${seatName(deal.turnState?.currentSeat)}.`}
-        </Text>
+        {canPass || isFinished ? (
+          <Text style={styles.statusText}>
+            {canPass
+              ? 'Choose one card for your teammate, left opponent, and right opponent. Bots pass automatically.'
+              : 'Three players are out. The hand score is ready.'}
+          </Text>
+        ) : null}
         {canPass ? (
           <>
             <View style={styles.passTargets}>
@@ -408,52 +374,24 @@ export default function OfflineBotGameScreen() {
           </>
         ) : (
           <>
-            <Text style={styles.statusText}>
-              {currentWinningPlay
-                ? `${seatName(currentWinningPlay.seat)} has ${currentWinningPlay.combo?.label ?? 'the current table'}.`
-                : 'This trick has not been led yet.'}
-            </Text>
-            <View style={styles.playHistory}>
-              {currentTrickPlays.length > 0 ? (
-                currentTrickPlays.map((play) => (
-                  <View key={play.id} style={styles.playRow}>
-                    <Text style={styles.playSeat}>{seatName(play.seat)}</Text>
-                    <Text style={styles.playCards}>
-                      {play.action === 'pass' ? 'Pass' : `${play.combo?.label ?? 'Play'} - ${visibleCardList(play.cards)}`}
-                    </Text>
-                  </View>
-                ))
-              ) : (
-                <Text style={styles.statusText}>No cards on the table yet.</Text>
-              )}
+            <TrickTable plays={newestCurrentTrickPlays} />
+            <View style={styles.turnActions}>
+              <View style={styles.turnAction}>
+                <Button
+                  disabled={!isHumanTurn || !playValidation.valid}
+                  label={playValidation.valid ? `Play ${playValidation.count}` : 'Select'}
+                  onPress={handleSubmitPlay}
+                />
+              </View>
+              <View style={styles.turnAction}>
+                <Button
+                  disabled={!isHumanTurn || mustLeadTrick}
+                  label="Pass"
+                  onPress={handlePassTurn}
+                  variant="secondary"
+                />
+              </View>
             </View>
-            {isHumanTurn ? (
-              <>
-                <View style={styles.comboPreview}>
-                  <Text style={styles.comboLabel}>{playValidation.valid ? playValidation.label : 'Invalid selection'}</Text>
-                  {selectedCardIds.length > 0 ? (
-                    <Text style={styles.comboMeta}>{playValidation.valid ? 'Ready to play.' : playValidation.reason}</Text>
-                  ) : null}
-                </View>
-                <View style={styles.turnActions}>
-                  <View style={styles.turnAction}>
-                    <Button
-                      disabled={!playValidation.valid}
-                      label={playValidation.valid ? `Play ${playValidation.count}` : 'Select legal play'}
-                      onPress={handleSubmitPlay}
-                    />
-                  </View>
-                  <View style={styles.turnAction}>
-                    <Button
-                      disabled={mustLeadTrick}
-                      label={mustLeadTrick ? 'Lead required' : 'Pass'}
-                      onPress={handlePassTurn}
-                      variant="secondary"
-                    />
-                  </View>
-                </View>
-              </>
-            ) : null}
           </>
         )}
       </View>
@@ -523,6 +461,92 @@ function getMatchWinner(scores: MatchScores, targetScore: MatchTargetScore | nul
   }
 
   return null;
+}
+
+function TrickTable({ plays }: { plays: OfflinePlay[] }) {
+  return (
+    <View style={styles.trickTable}>
+      {plays.length > 0 ? (
+        plays.map((play, index) => <TrickPlayPile index={index} key={play.id} play={play} playCount={plays.length} />)
+      ) : null}
+    </View>
+  );
+}
+
+function TrickPlayPile({ index, play, playCount }: { index: number; play: OfflinePlay; playCount: number }) {
+  const entrance = useRef(new Animated.Value(0)).current;
+  const displayCards = useMemo(() => sortCardsForHandDisplay(play.cards), [play.cards]);
+
+  useEffect(() => {
+    Animated.spring(entrance, {
+      damping: 13,
+      mass: 0.7,
+      stiffness: 180,
+      toValue: 1,
+      useNativeDriver: true,
+    }).start();
+  }, [entrance]);
+
+  const translateY = entrance.interpolate({
+    inputRange: [0, 1],
+    outputRange: [-14, 0],
+  });
+  const scale = entrance.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.96, 1],
+  });
+
+  return (
+    <Animated.View
+      style={[
+        styles.trickPile,
+        {
+          opacity: entrance,
+          top: 10 + index * 20,
+          transform: [{ translateY }, { scale }],
+          zIndex: playCount - index,
+        },
+      ]}>
+      <Text style={styles.trickPileSeat}>{seatName(play.seat)}</Text>
+      {play.action === 'pass' ? (
+        <View style={styles.trickPassChip}>
+          <Text style={styles.trickPassText}>Pass</Text>
+        </View>
+      ) : (
+        <View style={styles.trickMiniCards}>
+          {displayCards.map((card, cardIndex) => (
+            <MiniPlayedCard card={card} index={cardIndex} key={card.id} />
+          ))}
+        </View>
+      )}
+    </Animated.View>
+  );
+}
+
+function MiniPlayedCard({ card, index }: { card: TichuCard; index: number }) {
+  const redSuit = card.suit ? isRedSuit(card.suit) : false;
+
+  return (
+    <View style={[styles.trickMiniCard, { transform: [{ rotate: `${(index % 5) * 3 - 6}deg` }] }]}>
+      <Text adjustsFontSizeToFit numberOfLines={1} style={[styles.trickMiniRank, redSuit && styles.redSuit]}>
+        {card.rank ?? specialCardFaceLabel(card)}
+      </Text>
+      {card.suit ? <Text style={[styles.trickMiniSuit, redSuit && styles.redSuit]}>{suitSymbols[card.suit]}</Text> : null}
+    </View>
+  );
+}
+
+function specialCardFaceLabel(card: TichuCard) {
+  switch (card.id) {
+    case 'mah-jong':
+      return '1';
+    case 'phoenix':
+      return 'P';
+    case 'dragon':
+      return 'D';
+    default:
+      return card.label.slice(0, 1);
+  }
 }
 
 function CardTile({
@@ -867,25 +891,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '900',
   },
-  comboLabel: {
-    color: colors.text,
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  comboMeta: {
-    color: colors.muted,
-    fontSize: 13,
-    fontWeight: '700',
-    lineHeight: 18,
-  },
-  comboPreview: {
-    backgroundColor: colors.surface,
-    borderColor: colors.border,
-    borderRadius: 8,
-    borderWidth: 1,
-    gap: 4,
-    padding: spacing.md,
-  },
   header: {
     gap: spacing.sm,
     marginBottom: spacing.lg,
@@ -959,34 +964,86 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     paddingVertical: 5,
   },
-  playCards: {
-    color: colors.text,
-    flex: 1,
-    fontSize: 13,
-    fontWeight: '800',
-    lineHeight: 18,
-    textAlign: 'right',
-  },
-  playHistory: {
-    gap: spacing.sm,
-  },
-  playRow: {
+  trickMiniCard: {
     alignItems: 'center',
-    backgroundColor: colors.surface,
-    borderColor: colors.border,
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E2E8F0',
     borderRadius: 8,
     borderWidth: 1,
-    flexDirection: 'row',
-    gap: spacing.md,
-    justifyContent: 'space-between',
-    padding: spacing.md,
+    elevation: 2,
+    height: 44,
+    justifyContent: 'center',
+    marginRight: -10,
+    paddingVertical: 3,
+    shadowColor: '#0F172A',
+    shadowOffset: { height: 2, width: 0 },
+    shadowOpacity: 0.12,
+    shadowRadius: 3,
+    width: 30,
   },
-  playSeat: {
+  trickMiniCards: {
+    flexDirection: 'row',
+    paddingLeft: 3,
+  },
+  trickMiniRank: {
+    color: colors.text,
+    fontSize: 15,
+    fontWeight: '800',
+    lineHeight: 16,
+  },
+  trickMiniSuit: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '900',
+    lineHeight: 14,
+  },
+  trickPassChip: {
+    backgroundColor: '#E2E8F0',
+    borderRadius: 999,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 5,
+  },
+  trickPassText: {
     color: colors.muted,
-    flex: 1,
     fontSize: 12,
     fontWeight: '900',
     textTransform: 'uppercase',
+  },
+  trickPile: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+    left: 10,
+    maxWidth: '92%',
+    position: 'absolute',
+  },
+  trickPileSeat: {
+    backgroundColor: 'rgba(255, 255, 255, 0.8)',
+    borderRadius: 999,
+    color: colors.muted,
+    fontSize: 10,
+    fontWeight: '900',
+    minWidth: 58,
+    overflow: 'hidden',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    textAlign: 'center',
+    textTransform: 'uppercase',
+  },
+  trickTable: {
+    backgroundColor: '#DCFCE7',
+    borderColor: '#A7F3D0',
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 122,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  trickTableEmpty: {
+    color: colors.muted,
+    fontSize: 13,
+    fontWeight: '800',
+    padding: spacing.md,
   },
   pressed: {
     opacity: 0.78,
