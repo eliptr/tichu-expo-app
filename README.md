@@ -100,6 +100,10 @@ npm run typecheck
 
 On Windows, `npm run ios` opens Expo's iOS workflow but cannot build a local iOS native app. Use Expo Go for development, then EAS Build for iOS binaries.
 
+## Vercel web testing
+
+This app can be exported as a static Expo web app and deployed to Vercel for testing. The deployment settings are pinned in `vercel.json`; see `docs/vercel-testing.md` for the safety checklist, environment variables, and Supabase redirect setup.
+
 ## App routes
 
 - `/onboarding` - signed-out landing screen

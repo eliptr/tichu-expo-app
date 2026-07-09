@@ -14,6 +14,8 @@ import {
   createOfflineDeal,
   currentOfflineTrickPlays,
   currentOfflineWinningPlay,
+  generateOfflineLegalMoves,
+  offlineWishRanks,
   submitOfflinePass,
   submitOfflinePlay,
   visibleCardList,
@@ -21,6 +23,7 @@ import {
   type OfflinePlay,
   type OfflineSeat,
   type PassDirection,
+  type OfflineWishRank,
 } from '@/features/offline/offline-game';
 
 type MatchTargetScore = 500 | 1000 | 2000;
@@ -57,6 +60,7 @@ export default function OfflineBotGameScreen() {
     right: null,
     teammate: null,
   });
+  const [selectedWishRank, setSelectedWishRank] = useState<OfflineWishRank | null>(null);
 
   const displayHand = useMemo(() => sortCardsForHandDisplay(deal.humanHand), [deal.humanHand]);
   const canPass = deal.status === 'dealt';
@@ -78,6 +82,26 @@ export default function OfflineBotGameScreen() {
   const playValidation = useMemo(
     () => validatePlay(selectedPlayCards, currentWinningPlay?.combo ?? null),
     [currentWinningPlay?.combo, selectedPlayCards]
+  );
+  const selectedPlayHasMahJong = selectedPlayCards.some((card) => card.id === 'mah-jong');
+  const needsWishRank = isHumanTurn && playValidation.valid && selectedPlayHasMahJong;
+  const activeWishRank = deal.turnState?.wishRank ?? null;
+  const humanCanSatisfyWish = useMemo(
+    () =>
+      Boolean(
+        isHumanTurn &&
+          activeWishRank &&
+          generateOfflineLegalMoves(deal.humanHand, currentWinningPlay?.combo ?? null).some((move) =>
+            move.cards.some((card) => card.rank === activeWishRank)
+          )
+      ),
+    [activeWishRank, currentWinningPlay?.combo, deal.humanHand, isHumanTurn]
+  );
+  const selectedPlaySatisfiesWish = Boolean(
+    activeWishRank && selectedPlayCards.some((card) => card.rank === activeWishRank)
+  );
+  const selectedPlayViolatesWish = Boolean(
+    humanCanSatisfyWish && selectedPlayCards.length > 0 && !selectedPlaySatisfiesWish
   );
   const matchWinner = useMemo(() => getMatchWinner(matchScores, targetScore), [matchScores, targetScore]);
   const handCardWidth = useMemo(() => {
@@ -122,10 +146,17 @@ export default function OfflineBotGameScreen() {
     setScoredHandNumber(handNumber);
   }, [deal.scoreSummary, deal.status, handNumber, scoredHandNumber, targetScore]);
 
+  useEffect(() => {
+    if (!selectedPlayHasMahJong && selectedWishRank) {
+      setSelectedWishRank(null);
+    }
+  }, [selectedPlayHasMahJong, selectedWishRank]);
+
   function resetSelections() {
     setSelectedCardIds([]);
     setActivePassDirection('teammate');
     setSelectedPasses({ left: null, right: null, teammate: null });
+    setSelectedWishRank(null);
   }
 
   function handleStartMatch(selectedTargetScore: MatchTargetScore) {
@@ -208,13 +239,29 @@ export default function OfflineBotGameScreen() {
       return;
     }
 
-    setDeal((currentDeal) => submitOfflinePlay(currentDeal, currentDeal.humanSeat, selectedPlayCards));
-    setSelectedCardIds([]);
+    if (selectedPlayHasMahJong && !selectedWishRank) {
+      Alert.alert('Choose a wish', 'Mah Jong must ask for a rank before you play it.');
+      return;
+    }
+
+    try {
+      setDeal(submitOfflinePlay(deal, deal.humanSeat, selectedPlayCards, selectedPlayHasMahJong ? selectedWishRank : null));
+      setSelectedCardIds([]);
+      setSelectedWishRank(null);
+    } catch (error) {
+      Alert.alert('Wish obligation', error instanceof Error ? error.message : 'That play is not allowed right now.');
+    }
   }
 
   function handlePassTurn() {
+    if (humanCanSatisfyWish) {
+      Alert.alert('Wish obligation', `Mah Jong wish is active: play ${activeWishRank} if possible.`);
+      return;
+    }
+
     setDeal((currentDeal) => submitOfflinePass(currentDeal, currentDeal.humanSeat));
     setSelectedCardIds([]);
+    setSelectedWishRank(null);
   }
 
   if (!targetScore) {
@@ -293,6 +340,9 @@ export default function OfflineBotGameScreen() {
               ? 'Choose one card for your teammate, left opponent, and right opponent. Bots pass automatically.'
               : 'Three players are out. The hand score is ready.'}
           </Text>
+        ) : null}
+        {!canPass && !isFinished && deal.turnState?.wishRank ? (
+          <Text style={styles.statusText}>Mah Jong wish: play {deal.turnState.wishRank} if possible.</Text>
         ) : null}
         {canPass ? (
           <>
@@ -374,19 +424,67 @@ export default function OfflineBotGameScreen() {
           </>
         ) : (
           <>
+            {isHumanTurn && selectedCardIds.length > 0 ? (
+              <Text style={styles.statusText}>
+                {needsWishRank
+                  ? 'Choose the rank you want before playing Mah Jong.'
+                  : selectedPlayViolatesWish
+                    ? `Mah Jong wish is active: play ${activeWishRank} if possible.`
+                  : playValidation.valid
+                    ? playValidation.label
+                    : playValidation.reason}
+              </Text>
+            ) : null}
             <TrickTable plays={newestCurrentTrickPlays} />
+            {needsWishRank ? (
+              <View style={styles.wishPicker}>
+                <Text style={styles.wishPickerTitle}>Mah Jong wish</Text>
+                <View style={styles.wishRankGrid}>
+                  {offlineWishRanks.map((rank) => {
+                    const isSelected = selectedWishRank === rank;
+
+                    return (
+                      <Pressable
+                        accessibilityRole="button"
+                        key={rank}
+                        onPress={() => setSelectedWishRank(rank)}
+                        style={({ pressed }) => [
+                          styles.wishRankOption,
+                          isSelected && styles.selectedWishRankOption,
+                          pressed && styles.pressed,
+                        ]}>
+                        <Text style={[styles.wishRankText, isSelected && styles.selectedWishRankText]}>{rank}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+            ) : null}
             <View style={styles.turnActions}>
               <View style={styles.turnAction}>
                 <Button
-                  disabled={!isHumanTurn || !playValidation.valid}
-                  label={playValidation.valid ? `Play ${playValidation.count}` : 'Select'}
+                  disabled={
+                    !isHumanTurn ||
+                    !playValidation.valid ||
+                    selectedPlayViolatesWish ||
+                    (selectedPlayHasMahJong && !selectedWishRank)
+                  }
+                  label={
+                    selectedPlayViolatesWish
+                      ? 'Wish'
+                      : selectedPlayHasMahJong && !selectedWishRank
+                        ? 'Wish'
+                        : playValidation.valid
+                          ? `Play ${playValidation.count}`
+                          : 'Select'
+                  }
                   onPress={handleSubmitPlay}
                 />
               </View>
               <View style={styles.turnAction}>
                 <Button
-                  disabled={!isHumanTurn || mustLeadTrick}
-                  label="Pass"
+                  disabled={!isHumanTurn || mustLeadTrick || humanCanSatisfyWish}
+                  label={humanCanSatisfyWish ? 'Wish' : 'Pass'}
                   onPress={handlePassTurn}
                   variant="secondary"
                 />
@@ -513,10 +611,17 @@ function TrickPlayPile({ index, play, playCount }: { index: number; play: Offlin
           <Text style={styles.trickPassText}>Pass</Text>
         </View>
       ) : (
-        <View style={styles.trickMiniCards}>
-          {displayCards.map((card, cardIndex) => (
-            <MiniPlayedCard card={card} index={cardIndex} key={card.id} />
-          ))}
+        <View style={styles.trickPlayContent}>
+          <View style={styles.trickMiniCards}>
+            {displayCards.map((card, cardIndex) => (
+              <MiniPlayedCard card={card} index={cardIndex} key={card.id} />
+            ))}
+          </View>
+          {play.wishRank ? (
+            <View style={styles.trickWishChip}>
+              <Text style={styles.trickWishText}>Wish {play.wishRank}</Text>
+            </View>
+          ) : null}
         </View>
       )}
     </Animated.View>
@@ -1009,6 +1114,9 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     textTransform: 'uppercase',
   },
+  trickPlayContent: {
+    gap: 3,
+  },
   trickPile: {
     alignItems: 'center',
     flexDirection: 'row',
@@ -1028,6 +1136,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: 7,
     paddingVertical: 3,
     textAlign: 'center',
+    textTransform: 'uppercase',
+  },
+  trickWishChip: {
+    alignSelf: 'flex-start',
+    backgroundColor: colors.accentSoft,
+    borderRadius: 999,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+  },
+  trickWishText: {
+    color: colors.accent,
+    fontSize: 9,
+    fontWeight: '900',
     textTransform: 'uppercase',
   },
   trickTable: {
@@ -1141,5 +1262,46 @@ const styles = StyleSheet.create({
   turnActions: {
     flexDirection: 'row',
     gap: spacing.md,
+  },
+  selectedWishRankOption: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
+  },
+  selectedWishRankText: {
+    color: colors.background,
+  },
+  wishPicker: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: spacing.sm,
+    padding: spacing.sm,
+  },
+  wishPickerTitle: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  wishRankGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 5,
+  },
+  wishRankOption: {
+    alignItems: 'center',
+    backgroundColor: colors.background,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    minWidth: 38,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  wishRankText: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: '900',
   },
 });

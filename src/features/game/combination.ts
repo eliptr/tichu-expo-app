@@ -154,6 +154,72 @@ function analyzePhoenixCards(cards: TichuCard[]): CombinationResult {
   return { reason: 'Phoenix does not complete a supported combination.', valid: false };
 }
 
+function analyzeMahJongCards(cards: TichuCard[]): CombinationResult {
+  const nonMahJongCards = cards.filter((card) => card.id !== 'mah-jong');
+
+  if (cards.length === 1) {
+    return validCombo({
+      count: 1,
+      is_bomb: false,
+      label: 'Single Mah Jong',
+      rank: 1,
+      type: 'single',
+    });
+  }
+
+  if (nonMahJongCards.some((card) => card.kind !== 'standard')) {
+    return { reason: 'Mah Jong can only join normal suited cards in a straight.', valid: false };
+  }
+
+  const ranks = cards.map(cardRank).sort((a, b) => a - b);
+  const distinctRanks = [...new Set(ranks)];
+  const count = cards.length;
+  const minRank = ranks[0];
+  const maxRank = ranks[ranks.length - 1];
+  const isStraight = count >= 5 && distinctRanks.length === count && minRank === 1 && maxRank - minRank + 1 === count;
+
+  if (isStraight) {
+    return validCombo({
+      count,
+      is_bomb: false,
+      label: `Straight to ${rankLabel(maxRank)}`,
+      rank: maxRank,
+      type: 'straight',
+    });
+  }
+
+  return { reason: 'Mah Jong can only be a single or the low card in a straight.', valid: false };
+}
+
+function analyzeMahJongPhoenixCards(cards: TichuCard[]): CombinationResult {
+  const normalCards = cards.filter((card) => card.id !== 'mah-jong' && card.id !== 'phoenix');
+
+  if (normalCards.some((card) => card.kind !== 'standard')) {
+    return { reason: 'Mah Jong and Phoenix can only join normal suited cards in a straight.', valid: false };
+  }
+
+  const fixedRanks = [1, ...normalCards.map(cardRank)].sort((a, b) => a - b);
+  const distinctRanks = [...new Set(fixedRanks)];
+  const count = cards.length;
+  const targetSequence = Array.from({ length: count }, (_, index) => index + 1);
+  const fixedRanksFit = fixedRanks.every((rank) => targetSequence.includes(rank));
+  const missingCount = targetSequence.filter((rank) => !distinctRanks.includes(rank)).length;
+
+  if (count >= 5 && distinctRanks.length === fixedRanks.length && fixedRanksFit && missingCount === 1) {
+    const maxRank = targetSequence[targetSequence.length - 1];
+
+    return validCombo({
+      count,
+      is_bomb: false,
+      label: `Straight to ${rankLabel(maxRank)}`,
+      rank: maxRank,
+      type: 'straight',
+    });
+  }
+
+  return { reason: 'Mah Jong and Phoenix can only combine as the low straight with one missing rank.', valid: false };
+}
+
 export function analyzeCards(cards: TichuCard[]): CombinationResult {
   if (cards.length === 0) {
     return { reason: 'Choose cards to play.', valid: false };
@@ -173,8 +239,16 @@ export function analyzeCards(cards: TichuCard[]): CombinationResult {
     return { reason: 'Dog must be played by itself.', valid: false };
   }
 
+  if (cards.some((card) => card.id === 'mah-jong') && cards.some(isPhoenix)) {
+    return analyzeMahJongPhoenixCards(cards);
+  }
+
   if (cards.some(isPhoenix)) {
     return analyzePhoenixCards(cards);
+  }
+
+  if (cards.some((card) => card.id === 'mah-jong')) {
+    return analyzeMahJongCards(cards);
   }
 
   const specialCards = cards.filter((card) => card.kind === 'special');

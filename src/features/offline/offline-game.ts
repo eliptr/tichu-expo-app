@@ -7,6 +7,7 @@ export type PassDirection = 'left' | 'right' | 'teammate';
 export type OfflineGameStatus = 'dealt' | 'finished' | 'playing';
 export type OfflineHands = Record<OfflineSeat, TichuCard[]>;
 export type OfflinePassSelection = Record<PassDirection, string>;
+export type OfflineWishRank = '10' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | 'A' | 'J' | 'K' | 'Q';
 export type OfflineWonCards = Record<OfflineSeat, TichuCard[]>;
 export type OfflineWonTricks = Record<OfflineSeat, number>;
 
@@ -17,15 +18,19 @@ export type OfflinePlay = {
   id: string;
   seat: OfflineSeat;
   trickNumber: number;
+  wishRank?: OfflineWishRank | null;
 };
 
 export type OfflineLegalMove = {
   action: 'play';
   cards: TichuCard[];
   combo: TichuCombination;
+  wishRank?: OfflineWishRank | null;
 };
 
-type OfflineBotDecision = OfflineLegalMove | { action: 'pass' };
+export type OfflineSimulationMove = OfflineLegalMove | { action: 'pass' };
+
+type OfflineBotDecision = OfflineSimulationMove;
 
 export type OfflineBotCandidateScore = {
   cards: TichuCard[];
@@ -48,6 +53,7 @@ export type OfflineTurnState = {
   currentWinningSeat: OfflineSeat | null;
   passCount: number;
   trickNumber: number;
+  wishRank: OfflineWishRank | null;
 };
 
 export type OfflinePlayer = {
@@ -84,6 +90,7 @@ export type OfflineDeal = {
 
 const suits: NonNullable<TichuCard['suit']>[] = ['jade', 'sword', 'pagoda', 'star'];
 const ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
+export const offlineWishRanks: OfflineWishRank[] = ['A', 'K', 'Q', 'J', '10', '9', '8', '7', '6', '5', '4', '3', '2'];
 const seats: OfflineSeat[] = ['team_one_player_one', 'team_two_player_one', 'team_one_player_two', 'team_two_player_two'];
 const teams: OfflineTeam[] = ['team_one', 'team_two'];
 const suitSymbols: Record<NonNullable<TichuCard['suit']>, string> = {
@@ -312,6 +319,21 @@ function cardRankValue(card: TichuCard) {
   }
 }
 
+function cardRankForWish(rank: OfflineWishRank) {
+  switch (rank) {
+    case 'J':
+      return 11;
+    case 'Q':
+      return 12;
+    case 'K':
+      return 13;
+    case 'A':
+      return 14;
+    default:
+      return Number(rank);
+  }
+}
+
 function trickRecipient(winningPlay: OfflinePlay) {
   if (winningPlay.cards.some((card) => card.id === 'dragon')) {
     return offlineLeftSeat(winningPlay.seat);
@@ -446,8 +468,12 @@ function candidateCardGroups(hand: TichuCard[]) {
   });
 }
 
-export function generateOfflineLegalMoves(hand: TichuCard[], currentCombo: TichuCombination | null): OfflineLegalMove[] {
-  return candidateCardGroups(hand)
+export function generateOfflineLegalMoves(
+  hand: TichuCard[],
+  currentCombo: TichuCombination | null,
+  wishRank: OfflineWishRank | null = null
+): OfflineLegalMove[] {
+  const moves = candidateCardGroups(hand)
     .map((cards) => ({ cards, result: validatePlay(cards, currentCombo) }))
     .filter((candidate): candidate is { cards: TichuCard[]; result: TichuCombination } => candidate.result.valid)
     .map((candidate) => ({
@@ -455,6 +481,9 @@ export function generateOfflineLegalMoves(hand: TichuCard[], currentCombo: Tichu
       cards: candidate.cards,
       combo: candidate.result,
     }));
+  const wishedMoves = moves.filter((move) => cardsContainWishRank(move.cards, wishRank));
+
+  return wishedMoves.length > 0 ? wishedMoves : moves;
 }
 
 function breaksFourBomb(hand: TichuCard[], move: OfflineLegalMove) {
@@ -480,18 +509,202 @@ function containsCard(move: OfflineLegalMove, cardId: string) {
   return move.cards.some((card) => card.id === cardId);
 }
 
+function cardsContainWishRank(cards: TichuCard[], wishRank: OfflineWishRank | null) {
+  return Boolean(wishRank && cards.some((card) => card.rank === wishRank));
+}
+
+function playedRanksForCards(cards: TichuCard[]) {
+  return new Set(cards.map((card) => card.rank).filter((rank): rank is OfflineWishRank => Boolean(rank)));
+}
+
+function chooseMahJongWish(cards: TichuCard[]): OfflineWishRank {
+  const playedRanks = playedRanksForCards(cards);
+
+  return offlineWishRanks.find((rank) => !playedRanks.has(rank)) ?? 'A';
+}
+
+function rankCount(cards: TichuCard[], rank: OfflineWishRank) {
+  return cards.filter((card) => card.rank === rank).length;
+}
+
+function visiblePlayedRankCount(deal: OfflineDeal, rank: OfflineWishRank) {
+  return deal.plays.reduce((sum, play) => sum + rankCount(play.cards, rank), 0);
+}
+
+function opponentSeatsFor(seat: OfflineSeat) {
+  return seats.filter((candidateSeat) => teamForSeat(candidateSeat) !== teamForSeat(seat));
+}
+
+function opponentNearOut(deal: OfflineDeal, seat: OfflineSeat, maxCards = 1) {
+  return opponentSeatsFor(seat).some(
+    (opponentSeat) => !deal.finishOrder.includes(opponentSeat) && deal.hands[opponentSeat].length > 0 && deal.hands[opponentSeat].length <= maxCards
+  );
+}
+
+function teammateNearOut(deal: OfflineDeal, seat: OfflineSeat, maxCards = 2) {
+  const teammate = teammateSeat(seat);
+  const cardCount = deal.hands[teammate].length;
+
+  return !deal.finishOrder.includes(teammate) && cardCount > 0 && cardCount <= maxCards;
+}
+
+function remainingCardsAfterMove(hand: TichuCard[], move: OfflineLegalMove) {
+  const playedIds = new Set(move.cards.map((card) => card.id));
+
+  return hand.filter((card) => !playedIds.has(card.id));
+}
+
+function lowLooseSingleCount(cards: TichuCard[]) {
+  const standardCards = cards.filter((card) => card.kind === 'standard');
+  const counts = new Map<number, number>();
+
+  standardCards.forEach((card) => {
+    const rank = cardRankValue(card);
+    counts.set(rank, (counts.get(rank) ?? 0) + 1);
+  });
+
+  return standardCards.filter((card) => cardRankValue(card) <= 7 && counts.get(cardRankValue(card)) === 1).length;
+}
+
+function lowestLowLooseSingleRank(cards: TichuCard[]) {
+  const standardCards = cards.filter((card) => card.kind === 'standard');
+  const counts = new Map<number, number>();
+
+  standardCards.forEach((card) => {
+    const rank = cardRankValue(card);
+    counts.set(rank, (counts.get(rank) ?? 0) + 1);
+  });
+
+  const [lowestRank] = standardCards
+    .filter((card) => cardRankValue(card) <= 7 && counts.get(cardRankValue(card)) === 1)
+    .map(cardRankValue)
+    .sort((a, b) => a - b);
+
+  return lowestRank ?? null;
+}
+
+function cleanRemainingCombo(cards: TichuCard[]) {
+  if (cards.length === 0) {
+    return null;
+  }
+
+  const combo = validatePlay(cards, null);
+
+  return combo.valid ? combo : null;
+}
+
+function twoTurnExitPlanScore(move: OfflineLegalMove, remainingHand: TichuCard[]) {
+  const remainingCombo = cleanRemainingCombo(remainingHand);
+
+  if (!remainingCombo) {
+    return 0;
+  }
+
+  const firstMoveCost = move.combo.count * 18 + move.combo.rank * 0.5 + Math.max(0, cardPointTotal(move.cards)) * 0.6;
+  const remainingComboValue = remainingCombo.count * 28 + remainingCombo.rank * 0.6;
+
+  return 120 + remainingComboValue - firstMoveCost;
+}
+
+function leadLetsTeammateFinish(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMove) {
+  const teammate = teammateSeat(seat);
+  const teammateHand = deal.hands[teammate];
+
+  if (deal.finishOrder.includes(teammate) || teammateHand.length === 0 || teammateHand.length > 3) {
+    return false;
+  }
+
+  return validatePlay(teammateHand, move.combo).valid;
+}
+
+function isOpeningLead(deal: OfflineDeal) {
+  return Boolean(deal.turnState && deal.turnState.trickNumber === 1 && deal.plays.length === 0 && !deal.turnState.currentWinningSeat);
+}
+
+function chooseBotMahJongWish(deal: OfflineDeal, seat: OfflineSeat, cards: TichuCard[]): OfflineWishRank {
+  const playedRanks = new Set(cards.map((card) => card.rank).filter((rank): rank is OfflineWishRank => Boolean(rank)));
+  const partner = teammateSeat(seat);
+
+  const [bestRank] = offlineWishRanks
+    .filter((rank) => !playedRanks.has(rank))
+    .map((rank) => {
+      const partnerCount = rankCount(deal.hands[partner], rank);
+      const ownCount = rankCount(deal.hands[seat], rank);
+      const opponentCount = seats
+        .filter((candidateSeat) => teamForSeat(candidateSeat) !== teamForSeat(seat))
+        .reduce((sum, opponentSeat) => sum + rankCount(deal.hands[opponentSeat], rank), 0);
+      const visibleCount = visiblePlayedRankCount(deal, rank) + (playedRanks.has(rank) ? 1 : 0);
+
+      return {
+        rank,
+        score: partnerCount * 80 - ownCount * 45 - opponentCount * 24 - visibleCount * 30 + cardRankForWish(rank) * 0.5,
+      };
+    })
+    .sort((a, b) => b.score - a.score || cardRankForWish(b.rank) - cardRankForWish(a.rank));
+
+  return bestRank?.rank ?? chooseMahJongWish(cards);
+}
+
 function describeBotMove(move: OfflineLegalMove) {
-  return `${move.combo.label} - ${visibleCardList(move.cards)}`;
+  const wishLabel = move.wishRank ? ` (wish ${move.wishRank})` : '';
+
+  return `${move.combo.label}${wishLabel} - ${visibleCardList(move.cards)}`;
 }
 
 function scoreBotMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMove) {
   const hand = deal.hands[seat];
   const remainingCards = hand.length - move.cards.length;
+  const remainingHand = remainingCardsAfterMove(hand, move);
+  const lowLooseSinglesLeft = lowLooseSingleCount(remainingHand);
+  const lowLooseSinglesBefore = lowLooseSingleCount(hand);
+  const lowestLowLooseRank = lowestLowLooseSingleRank(hand);
   const winningPlay = currentWinningPlay(deal);
   const currentTrickPoints = deal.turnState ? cardPointTotal(cardsForTrick(deal.plays, deal.turnState.trickNumber)) : 0;
   const teammateIsWinning = Boolean(winningPlay && teamForSeat(winningPlay.seat) === teamForSeat(seat));
   const opponentIsWinning = Boolean(winningPlay && teamForSeat(winningPlay.seat) !== teamForSeat(seat));
+  const activeWishRank = deal.turnState?.wishRank ?? null;
+  const teammateIsNearOut = teammateNearOut(deal, seat);
+  const leadFinishesTeammate = !winningPlay && leadLetsTeammateFinish(deal, seat, move);
+  const openingLead = isOpeningLead(deal);
+  const opponentIsNearOut = opponentNearOut(deal, seat);
+  const quietLead = !winningPlay && !leadFinishesTeammate && !opponentIsNearOut;
+  const opponentHasNearOutThreat = opponentIsWinning && opponentNearOut(deal, seat);
+  const opponentNearOutPressure = Boolean(
+    winningPlay?.combo && opponentHasNearOutThreat && (winningPlay.combo.type !== 'single' || winningPlay.combo.rank < 14)
+  );
+  const opponentSingleNearOutPressure = Boolean(
+    winningPlay?.combo && opponentHasNearOutThreat && winningPlay.combo.type === 'single' && winningPlay.combo.rank < 14
+  );
   let score = 0;
+
+  if (activeWishRank && cardsContainWishRank(move.cards, activeWishRank)) {
+    score = 220;
+    score -= move.combo.count * 12;
+    score -= move.combo.rank * 0.7;
+    score -= Math.max(0, cardPointTotal(move.cards)) * 0.4;
+
+    if (remainingCards === 0) {
+      score += 500;
+    }
+
+    if (move.combo.is_bomb) {
+      score -= 300;
+    }
+
+    if (breaksFourBomb(hand, move)) {
+      score -= 240;
+    }
+
+    if (containsCard(move, 'dragon')) {
+      score -= 180;
+    }
+
+    if (containsCard(move, 'phoenix')) {
+      score -= 100;
+    }
+
+    return score;
+  }
 
   score += move.combo.count * 22;
   score -= move.combo.rank * 0.8;
@@ -506,6 +719,45 @@ function scoreBotMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMo
   if (!winningPlay) {
     score += move.combo.count * 8;
 
+    if (containsCard(move, 'mah-jong')) {
+      score += openingLead ? 240 : 45;
+    } else if (openingLead && hand.some((card) => card.id === 'mah-jong')) {
+      score -= move.combo.count >= 5 ? 120 : 70;
+    }
+
+    if (leadFinishesTeammate) {
+      score += 380;
+    }
+
+    if (quietLead && move.combo.type === 'single' && lowLooseSinglesBefore > 0) {
+      score += 95;
+
+      if (lowestLowLooseRank !== null && move.combo.rank === lowestLowLooseRank) {
+        score += 80;
+      }
+    }
+
+    if (quietLead && remainingCards > 0) {
+      score += twoTurnExitPlanScore(move, remainingHand);
+    }
+
+    if (quietLead && move.combo.count >= 2 && lowLooseSinglesBefore > 0 && !containsCard(move, 'mah-jong')) {
+      score -= move.combo.count * 20;
+      score -= Math.max(0, cardPointTotal(move.cards)) * 0.8;
+    }
+
+    if (quietLead && move.combo.count >= 3 && lowLooseSinglesLeft > 0) {
+      score -= lowLooseSinglesLeft * 95;
+    }
+
+    if (opponentIsNearOut) {
+      if (move.combo.type === 'single') {
+        score += move.combo.rank * 2.2;
+      } else {
+        score += 55 + move.combo.count * 12;
+      }
+    }
+
     if (move.combo.type === 'single' && hand.length > 5) {
       score -= 10;
     }
@@ -517,6 +769,10 @@ function scoreBotMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMo
 
   if (opponentIsWinning) {
     score += 75 + currentTrickPoints * 1.2;
+
+    if (opponentNearOutPressure) {
+      score += 150;
+    }
   }
 
   if (move.combo.is_bomb) {
@@ -529,6 +785,10 @@ function scoreBotMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMo
 
   if (containsCard(move, 'dragon')) {
     score += remainingCards === 0 || currentTrickPoints >= 25 ? 35 : -160;
+
+    if (opponentSingleNearOutPressure) {
+      score += 130;
+    }
   }
 
   if (containsCard(move, 'phoenix')) {
@@ -537,12 +797,21 @@ function scoreBotMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMo
     if (move.cards.length === 1) {
       score += remainingCards === 0 ? 0 : -110;
     }
+
+    if (opponentSingleNearOutPressure) {
+      score += 80;
+    }
   }
 
   if (containsCard(move, 'dog')) {
     const teammate = teammateSeat(seat);
     const teammateCanLead = deal.hands[teammate].length > 0 && !deal.finishOrder.includes(teammate);
-    score += teammateCanLead ? 90 : -160;
+    const hasOpeningMahJong = openingLead && hand.some((card) => card.id === 'mah-jong');
+    score += teammateCanLead ? (hasOpeningMahJong ? 90 : 360) : -160;
+
+    if (teammateIsNearOut) {
+      score += 170;
+    }
 
     if (remainingCards <= 2) {
       score -= 45;
@@ -553,7 +822,15 @@ function scoreBotMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMo
 }
 
 function scoredBotMoves(deal: OfflineDeal, seat: OfflineSeat) {
-  return generateOfflineLegalMoves(deal.hands[seat], currentWinningPlay(deal)?.combo ?? null)
+  return generateOfflineLegalMoves(deal.hands[seat], currentWinningPlay(deal)?.combo ?? null, deal.turnState?.wishRank ?? null)
+    .map((move) =>
+      containsCard(move, 'mah-jong')
+        ? {
+            ...move,
+            wishRank: chooseBotMahJongWish(deal, seat, move.cards),
+          }
+        : move
+    )
     .map((move) => ({
       move,
       score: scoreBotMove(deal, seat, move),
@@ -628,11 +905,39 @@ function moveReason(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMove
   }
 
   if (containsCard(move, 'dog')) {
+    if (teammateNearOut(deal, seat)) {
+      return 'Best score because Dog gives a close partner the lead.';
+    }
+
     return 'Best score because Dog hands the lead to partner.';
+  }
+
+  if (containsCard(move, 'mah-jong') && move.wishRank) {
+    if (isOpeningLead(deal)) {
+      return `Best score because Mah Jong should open the hand and asks for ${move.wishRank}.`;
+    }
+
+    return `Best score and asks for ${move.wishRank} to pressure the next players.`;
+  }
+
+  if (!winningPlay && leadLetsTeammateFinish(deal, seat, move)) {
+    return 'Best score because it sets partner up to finish.';
+  }
+
+  if (!winningPlay && move.combo.type === 'single' && lowLooseSingleCount(deal.hands[seat]) >= 2) {
+    return 'Best score because it clears a weak single before shedding bigger combinations.';
   }
 
   if (move.combo.is_bomb) {
     return 'Best score because the trick is valuable enough to spend a bomb.';
+  }
+
+  if (opponentNearOut(deal, seat) && (!winningPlay || teamForSeat(winningPlay.seat) !== teamForSeat(seat))) {
+    return 'Best score because it pressures an opponent who is nearly out.';
+  }
+
+  if (!winningPlay && cleanRemainingCombo(remainingCardsAfterMove(deal.hands[seat], move))) {
+    return 'Best score because it creates a two-play exit plan.';
   }
 
   if (winningPlay && teamForSeat(winningPlay.seat) !== teamForSeat(seat)) {
@@ -650,6 +955,12 @@ function chooseOfflineBotDecision(deal: OfflineDeal, seat: OfflineSeat): { decis
 
   if (moves.length === 0) {
     return passDecision(deal, seat, 'No legal move can beat the current table.');
+  }
+
+  if (deal.turnState?.wishRank && moves.some((move) => cardsContainWishRank(move.cards, deal.turnState?.wishRank ?? null))) {
+    const [bestWishMove] = scoredMoves;
+
+    return playDecision(deal, seat, bestWishMove.move, `Mah Jong wish is active, so the bot must play ${deal.turnState.wishRank}.`, scoredMoves);
   }
 
   if (winningPlay && teamForSeat(winningPlay.seat) === teamForSeat(seat)) {
@@ -711,6 +1022,80 @@ function completedFinishOrder(finishOrder: OfflineSeat[]) {
 
 function activeSeatCount(nextHands: OfflineHands, finishOrder: OfflineSeat[]) {
   return seats.filter((seat) => nextHands[seat].length > 0 && !finishOrder.includes(seat)).length;
+}
+
+function cloneHands(hands: OfflineHands): OfflineHands {
+  return {
+    team_one_player_one: [...hands.team_one_player_one],
+    team_one_player_two: [...hands.team_one_player_two],
+    team_two_player_one: [...hands.team_two_player_one],
+    team_two_player_two: [...hands.team_two_player_two],
+  };
+}
+
+function cloneWonCards(wonCards: OfflineWonCards): OfflineWonCards {
+  return {
+    team_one_player_one: [...wonCards.team_one_player_one],
+    team_one_player_two: [...wonCards.team_one_player_two],
+    team_two_player_one: [...wonCards.team_two_player_one],
+    team_two_player_two: [...wonCards.team_two_player_two],
+  };
+}
+
+function cloneWonTricks(wonTricks: OfflineWonTricks): OfflineWonTricks {
+  return {
+    team_one_player_one: wonTricks.team_one_player_one,
+    team_one_player_two: wonTricks.team_one_player_two,
+    team_two_player_one: wonTricks.team_two_player_one,
+    team_two_player_two: wonTricks.team_two_player_two,
+  };
+}
+
+export function cloneOfflineDeal(deal: OfflineDeal): OfflineDeal {
+  const hands = cloneHands(deal.hands);
+
+  return {
+    ...deal,
+    botDiagnostics: deal.botDiagnostics
+      ? {
+          ...deal.botDiagnostics,
+          candidates: deal.botDiagnostics.candidates.map((candidate) => ({
+            ...candidate,
+            cards: [...candidate.cards],
+          })),
+          decisionCards: [...deal.botDiagnostics.decisionCards],
+        }
+      : null,
+    botPlayers: deal.botPlayers.map((player) => ({ ...player })),
+    finishOrder: [...deal.finishOrder],
+    hands,
+    humanHand: hands[deal.humanSeat],
+    plays: deal.plays.map((play) => ({
+      ...play,
+      cards: [...play.cards],
+      combo: play.combo ? { ...play.combo } : null,
+    })),
+    scoreSummary: deal.scoreSummary
+      ? {
+          ...deal.scoreSummary,
+          cardPoints: { ...deal.scoreSummary.cardPoints },
+          notes: [...deal.scoreSummary.notes],
+        }
+      : null,
+    turnState: deal.turnState ? { ...deal.turnState } : null,
+    wonCards: cloneWonCards(deal.wonCards),
+    wonTricks: cloneWonTricks(deal.wonTricks),
+  };
+}
+
+export function simulateOfflineMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineSimulationMove): OfflineDeal {
+  const clonedDeal = cloneOfflineDeal(deal);
+
+  if (move.action === 'pass') {
+    return submitOfflinePass(clonedDeal, seat);
+  }
+
+  return submitOfflinePlay(clonedDeal, seat, move.cards, move.wishRank);
 }
 
 export function createOfflineDeal(): OfflineDeal {
@@ -787,13 +1172,19 @@ export function applyOfflinePassing(deal: OfflineDeal, humanPassSelection: Offli
       currentWinningSeat: null,
       passCount: 0,
       trickNumber: 1,
+      wishRank: null,
     },
     wonCards: emptyWonCards(),
     wonTricks: emptyWonTricks(),
   };
 }
 
-export function submitOfflinePlay(deal: OfflineDeal, seat: OfflineSeat, cards: TichuCard[]): OfflineDeal {
+export function submitOfflinePlay(
+  deal: OfflineDeal,
+  seat: OfflineSeat,
+  cards: TichuCard[],
+  wishRankRequest?: OfflineWishRank | null
+): OfflineDeal {
   if (!deal.turnState || deal.status !== 'playing') {
     return deal;
   }
@@ -803,12 +1194,27 @@ export function submitOfflinePlay(deal: OfflineDeal, seat: OfflineSeat, cards: T
   }
 
   const currentCombo = currentWinningPlay(deal)?.combo ?? null;
+  const activeWishRank = deal.turnState.wishRank;
+  const canSatisfyWish = activeWishRank
+    ? generateOfflineLegalMoves(deal.hands[seat], currentCombo, null).some((move) => cardsContainWishRank(move.cards, activeWishRank))
+    : false;
+
+  if (canSatisfyWish && !cardsContainWishRank(cards, activeWishRank)) {
+    throw new Error(`Mah Jong wish is active: play ${activeWishRank} if possible.`);
+  }
+
   const result = validatePlay(cards, currentCombo);
 
   if (!result.valid) {
     throw new Error(result.reason);
   }
 
+  const playedMahJong = cards.some((card) => card.id === 'mah-jong');
+  const nextWishRank = playedMahJong
+    ? (wishRankRequest ?? chooseMahJongWish(cards))
+    : cardsContainWishRank(cards, activeWishRank)
+      ? null
+      : activeWishRank;
   const playedIds = new Set(cards.map((card) => card.id));
   const nextHands: OfflineHands = {
     ...deal.hands,
@@ -824,6 +1230,7 @@ export function submitOfflinePlay(deal: OfflineDeal, seat: OfflineSeat, cards: T
     id: playId(),
     seat,
     trickNumber: deal.turnState.trickNumber,
+    wishRank: playedMahJong ? nextWishRank : null,
   };
   const plays = [...deal.plays, play];
 
@@ -845,6 +1252,7 @@ export function submitOfflinePlay(deal: OfflineDeal, seat: OfflineSeat, cards: T
             currentWinningSeat: null,
             passCount: 0,
             trickNumber: deal.turnState.trickNumber + 1,
+            wishRank: nextWishRank,
           },
     };
   }
@@ -875,6 +1283,7 @@ export function submitOfflinePlay(deal: OfflineDeal, seat: OfflineSeat, cards: T
       currentWinningSeat: seat,
       passCount: 0,
       trickNumber: deal.turnState.trickNumber,
+      wishRank: nextWishRank,
     },
   };
 }
@@ -885,6 +1294,16 @@ export function submitOfflinePass(deal: OfflineDeal, seat: OfflineSeat) {
   }
 
   if (deal.turnState.currentSeat !== seat || !deal.turnState.currentWinningSeat) {
+    return deal;
+  }
+
+  const activeWishRank = deal.turnState.wishRank;
+  const currentCombo = currentWinningPlay(deal)?.combo ?? null;
+  const canSatisfyWish = activeWishRank
+    ? generateOfflineLegalMoves(deal.hands[seat], currentCombo, null).some((move) => cardsContainWishRank(move.cards, activeWishRank))
+    : false;
+
+  if (canSatisfyWish) {
     return deal;
   }
 
@@ -922,6 +1341,7 @@ export function submitOfflinePass(deal: OfflineDeal, seat: OfflineSeat) {
         currentWinningSeat: null,
         passCount: 0,
         trickNumber: trickNumber + 1,
+        wishRank: deal.turnState.wishRank,
       },
       wonCards: awarded.wonCards,
       wonTricks: awarded.wonTricks,
@@ -960,7 +1380,7 @@ export function advanceOfflineBotTurn(deal: OfflineDeal) {
 
   if (decision.action === 'play') {
     return {
-      ...submitOfflinePlay(deal, botSeat, decision.cards),
+      ...submitOfflinePlay(deal, botSeat, decision.cards, decision.wishRank),
       botDiagnostics: diagnostics,
     };
   }
