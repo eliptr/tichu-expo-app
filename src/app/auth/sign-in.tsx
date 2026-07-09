@@ -7,54 +7,134 @@ import { FormTextInput } from '@/components/form-text-input';
 import { Screen } from '@/components/screen';
 import { colors, spacing } from '@/constants/ui';
 import { resendConfirmationEmail, signInWithEmail } from '@/features/auth/auth-service';
+import { hasSupabaseEnv } from '@/lib/env';
+
+type AuthNotice = {
+  body: string;
+  tone: 'error' | 'info' | 'success';
+  title: string;
+};
 
 export default function SignInScreen() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [notice, setNotice] = useState<AuthNotice | null>(null);
 
   async function handleSignIn() {
     if (!email.trim() || !password) {
-      Alert.alert('Missing details', 'Enter your email and password.');
+      setNotice({
+        body: 'Enter your email and password.',
+        title: 'Missing details',
+        tone: 'error',
+      });
+      return;
+    }
+
+    if (!hasSupabaseEnv()) {
+      setNotice({
+        body: 'The deployed app is missing EXPO_PUBLIC_SUPABASE_URL or EXPO_PUBLIC_SUPABASE_ANON_KEY.',
+        title: 'Auth is not configured',
+        tone: 'error',
+      });
       return;
     }
 
     setLoading(true);
-    const { error } = await signInWithEmail(email.trim(), password);
-    setLoading(false);
+    setNotice(null);
 
-    if (error) {
-      if (error.message.toLowerCase().includes('email not confirmed')) {
-        Alert.alert('Email not confirmed', 'Confirm your email first, or resend the confirmation email.', [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Resend email', onPress: () => void handleResendConfirmation() },
-        ]);
+    try {
+      const { data, error } = await signInWithEmail(email.trim(), password);
+
+      if (error) {
+        console.error('Sign in failed', {
+          message: error.message,
+          status: 'status' in error ? error.status : undefined,
+        });
+
+        if (error.message.toLowerCase().includes('email not confirmed')) {
+          setNotice({
+            body: 'Confirm your email first, or use the resend button below.',
+            title: 'Email not confirmed',
+            tone: 'error',
+          });
+          return;
+        }
+
+        setNotice({
+          body: error.message,
+          title: 'Sign in failed',
+          tone: 'error',
+        });
         return;
       }
 
-      Alert.alert('Sign in failed', error.message);
-      return;
-    }
+      if (!data.session) {
+        setNotice({
+          body: 'Supabase accepted the request but did not return a session. Check email confirmation and Auth settings.',
+          title: 'No session returned',
+          tone: 'error',
+        });
+        return;
+      }
 
-    router.replace('/tabs/home');
+      setNotice({
+        body: 'Signed in. Opening your dashboard.',
+        title: 'Success',
+        tone: 'success',
+      });
+      router.replace('/tabs/home');
+    } catch (error) {
+      console.error('Unexpected sign in error', error);
+      setNotice({
+        body: error instanceof Error ? error.message : 'Check your browser console for the client-side auth error.',
+        title: 'Unexpected auth error',
+        tone: 'error',
+      });
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function handleResendConfirmation() {
     if (!email.trim()) {
-      Alert.alert('Missing email', 'Enter your email address first.');
+      setNotice({
+        body: 'Enter your email address first.',
+        title: 'Missing email',
+        tone: 'error',
+      });
       return;
     }
 
     setLoading(true);
-    const { error } = await resendConfirmationEmail(email.trim());
-    setLoading(false);
+    setNotice(null);
 
-    if (error) {
-      Alert.alert('Could not resend email', error.message);
-      return;
+    try {
+      const { error } = await resendConfirmationEmail(email.trim());
+
+      if (error) {
+        setNotice({
+          body: error.message,
+          title: 'Could not resend email',
+          tone: 'error',
+        });
+        return;
+      }
+
+      setNotice({
+        body: 'Check your inbox and tap the confirmation link.',
+        title: 'Confirmation sent',
+        tone: 'success',
+      });
+    } catch (error) {
+      setNotice({
+        body: error instanceof Error ? error.message : 'Check your browser console for details.',
+        title: 'Unexpected auth error',
+        tone: 'error',
+      });
+    } finally {
+      setLoading(false);
     }
-
-    Alert.alert('Confirmation sent', 'Check your inbox and tap the confirmation link.');
   }
 
   return (
@@ -91,6 +171,7 @@ export default function SignInScreen() {
           onPress={handleResendConfirmation}
           variant="secondary"
         />
+        {notice ? <AuthNoticeCard notice={notice} /> : null}
       </View>
 
       <View style={styles.links}>
@@ -102,6 +183,15 @@ export default function SignInScreen() {
         </Link>
       </View>
     </Screen>
+  );
+}
+
+function AuthNoticeCard({ notice }: { notice: AuthNotice }) {
+  return (
+    <View style={[styles.notice, notice.tone === 'error' && styles.errorNotice, notice.tone === 'success' && styles.successNotice]}>
+      <Text style={[styles.noticeTitle, notice.tone === 'error' && styles.errorNoticeTitle]}>{notice.title}</Text>
+      <Text style={styles.noticeBody}>{notice.body}</Text>
+    </View>
   );
 }
 
@@ -122,6 +212,36 @@ const styles = StyleSheet.create({
   },
   form: {
     gap: spacing.md,
+  },
+  notice: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: spacing.sm,
+    padding: spacing.md,
+  },
+  errorNotice: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FCA5A5',
+  },
+  successNotice: {
+    backgroundColor: '#ECFDF5',
+    borderColor: '#A7F3D0',
+  },
+  noticeTitle: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  errorNoticeTitle: {
+    color: colors.danger,
+  },
+  noticeBody: {
+    color: colors.muted,
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
   },
   links: {
     alignItems: 'center',
