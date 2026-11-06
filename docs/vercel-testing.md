@@ -18,7 +18,7 @@ Run these before pushing a deployment commit:
 npm run typecheck
 npm run lint
 npm run test:offline-bots
-npx expo export -p web
+npm run build:web
 ```
 
 ## Vercel Project Settings
@@ -27,7 +27,7 @@ When importing the GitHub repository in Vercel:
 
 - Framework Preset: Other
 - Install Command: `npm ci`
-- Build Command: `npx expo export -p web`
+- Build Command: `npm run build:web`
 - Output Directory: `dist`
 
 The same values are also pinned in `vercel.json`.
@@ -70,4 +70,4 @@ For safer testing, temporarily disable email confirmation in the staging Supabas
 5. Join/create a shared room only with staging accounts.
 6. On iPhone Safari, open the Vercel URL and use Share > Add to Home Screen.
 
-This deploy is not a full offline PWA yet. It serves the Expo web app from Vercel, but offline launch from the iPhone home screen still needs a service worker and manifest work.
+The production build includes the PWA manifest, icons, and a versioned service worker. For offline-first testing, Supabase variables are optional. Open the HTTPS deployment once online and allow the cache to install before testing airplane-mode launch. See offline-pwa.md for the offline test checklist.

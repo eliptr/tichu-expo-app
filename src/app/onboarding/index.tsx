@@ -10,14 +10,14 @@ export default function OnboardingScreen() {
     <Screen contentStyle={styles.content}>
       <View style={styles.hero}>
         <Text style={styles.badge}>Tichu App</Text>
-        <Text style={styles.title}>A tiny first step toward your Tichu table.</Text>
+        <Text style={styles.title}>Online prototype</Text>
         <Text style={styles.subtitle}>
-          This starter proves mobile auth, Supabase storage, and app routing before the game logic
-          gets layered in.
+          Sign in to try shared rooms and online scoring. This area requires an internet connection.
         </Text>
       </View>
 
       <View style={styles.actions}>
+        <Link href="/" asChild><Button label="Offline Home" variant="secondary" /></Link>
         <Link href="/auth/sign-up" asChild>
           <Button label="Create account" />
         </Link>

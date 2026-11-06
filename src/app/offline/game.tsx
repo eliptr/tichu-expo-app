@@ -1,7 +1,10 @@
+import { capturePosition, storePositionReport, type PositionReport } from '@/features/offline/position-reports';
+import { FormTextInput } from '@/components/form-text-input';
 import { router } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Animated, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 
+import { loadOfflineSave, saveOfflineGame } from '@/features/offline/offline-storage';
 import { Button } from '@/components/button';
 import { Screen } from '@/components/screen';
 import { colors, spacing } from '@/constants/ui';
@@ -62,6 +65,45 @@ export default function OfflineBotGameScreen() {
   });
   const [selectedWishRank, setSelectedWishRank] = useState<OfflineWishRank | null>(null);
 
+  const [reportDraft, setReportDraft] = useState<PositionReport | null>(null);
+  const [reportNote, setReportNote] = useState('');
+  const [reportMessage, setReportMessage] = useState('');
+  const [savingReport, setSavingReport] = useState(false);
+  const lastBotPosition = useRef<OfflineDeal | null>(null);
+  function reportPosition() {
+    setReportNote(''); setReportMessage('');
+    setReportDraft(capturePosition({ version: 1, deal, targetScore, matchScores, handNumber, scoredHandNumber, botDelay, showDiagnostics }, lastBotPosition.current));
+  }
+  async function saveReport() {
+    if (!reportDraft || savingReport) return;
+    setSavingReport(true);
+    try {
+      await storePositionReport({ ...reportDraft, note: reportNote.trim() });
+      setReportDraft(null); setReportMessage('Position saved. Find it in Offline Home → Saved position reports.');
+    } catch (error) { setReportMessage(error instanceof Error ? error.message : 'Could not save report. Try again.'); }
+    finally { setSavingReport(false); }
+  }
+  const [hydrated, setHydrated] = useState(false);
+  const [storageError, setStorageError] = useState('');
+  const [botDelay, setBotDelay] = useState(650);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  useEffect(() => {
+    let active = true;
+    loadOfflineSave().then(save => {
+      if (!active || !save) return;
+      setDeal(save.deal); setTargetScore(save.targetScore); setMatchScores(save.matchScores);
+      setHandNumber(save.handNumber); setScoredHandNumber(save.scoredHandNumber);
+      setBotDelay(save.botDelay); setShowDiagnostics(save.showDiagnostics);
+    }).catch(() => { if (active) setStorageError('Could not restore your save. You can start a new game.'); })
+      .finally(() => { if (active) setHydrated(true); });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
+    if (!hydrated) return;
+    saveOfflineGame({ version: 1, deal, targetScore, matchScores, handNumber, scoredHandNumber, botDelay, showDiagnostics })
+      .catch(() => setStorageError('Local saving is unavailable. Keep this screen open to continue your game.'));
+  }, [hydrated, deal, targetScore, matchScores, handNumber, scoredHandNumber, botDelay, showDiagnostics]);
+
   const displayHand = useMemo(() => sortCardsForHandDisplay(deal.humanHand), [deal.humanHand]);
   const canPass = deal.status === 'dealt';
   const isFinished = deal.status === 'finished';
@@ -121,16 +163,17 @@ export default function OfflineBotGameScreen() {
   );
 
   useEffect(() => {
-    if (!deal.turnState || deal.status !== 'playing' || deal.turnState.currentSeat === deal.humanSeat) {
+    if (reportDraft || !hydrated || !targetScore || !deal.turnState || deal.status !== 'playing' || deal.turnState.currentSeat === deal.humanSeat) {
       return undefined;
     }
 
     const timeoutId = setTimeout(() => {
-      setDeal((currentDeal) => advanceOfflineBotTurn(currentDeal));
-    }, 650);
+      lastBotPosition.current = deal;
+      setDeal(advanceOfflineBotTurn(deal));
+    }, botDelay);
 
     return () => clearTimeout(timeoutId);
-  }, [deal.humanSeat, deal.status, deal.turnState]);
+  }, [reportDraft, hydrated, targetScore, botDelay, deal]);
 
   useEffect(() => {
     if (!targetScore || deal.status !== 'finished' || !deal.scoreSummary || scoredHandNumber === handNumber) {
@@ -153,6 +196,7 @@ export default function OfflineBotGameScreen() {
   }, [selectedPlayHasMahJong, selectedWishRank]);
 
   function resetSelections() {
+    lastBotPosition.current = null;
     setSelectedCardIds([]);
     setActivePassDirection('teammate');
     setSelectedPasses({ left: null, right: null, teammate: null });
@@ -264,9 +308,22 @@ export default function OfflineBotGameScreen() {
     setSelectedWishRank(null);
   }
 
+  if (!hydrated) return <Screen><Text>Restoring local game...</Text></Screen>;
+
+  if (reportDraft) return <Screen keyboardAware contentStyle={{ gap: spacing.md }}>
+    <Text style={{ fontSize: 24, fontWeight: '700', color: colors.text }}>Report this position</Text>
+    <Text>Game paused. This report includes all hands, play history, scores and the latest bot diagnostics.</Text>
+    <Text>{reportDraft.position.deal.botDiagnostics?.reason || 'No bot decision recorded yet.'}</Text>
+    <FormTextInput label="What looked wrong? (optional)" accessibilityLabel="Report note" multiline maxLength={2000} value={reportNote} onChangeText={setReportNote} placeholder="Describe what you expected the bot to do" />
+    {reportMessage ? <Text accessibilityRole="alert">{reportMessage}</Text> : null}
+    <Button label="Save report locally" loading={savingReport} onPress={() => void saveReport()} />
+    <Button label="Cancel and resume" disabled={savingReport} variant="secondary" onPress={() => { setReportDraft(null); setReportMessage(''); }} />
+  </Screen>;
+
   if (!targetScore) {
     return (
       <Screen compact>
+        {storageError ? <Text accessibilityRole="alert">{storageError}</Text> : null}
         <View style={styles.matchStartPanel}>
           <Text style={styles.matchStartTitle}>Choose match length</Text>
           <View style={styles.targetOptions}>
@@ -281,7 +338,7 @@ export default function OfflineBotGameScreen() {
               </Pressable>
             ))}
           </View>
-          <Button label="Dashboard" onPress={() => router.back()} variant="secondary" />
+          <Button label="Offline Home" onPress={() => router.replace("/")} variant="secondary" />
         </View>
       </Screen>
     );
@@ -289,6 +346,9 @@ export default function OfflineBotGameScreen() {
 
   return (
     <Screen compact>
+        {storageError ? <Text accessibilityRole="alert">{storageError}</Text> : null}
+      <Button label="Report this position" variant="secondary" onPress={reportPosition} />
+      {reportMessage ? <Text accessibilityLiveRegion="polite">{reportMessage}</Text> : null}
       <View style={styles.header}>
         <Text style={styles.eyebrow}>Offline bots</Text>
       </View>
@@ -300,7 +360,7 @@ export default function OfflineBotGameScreen() {
             <Pressable accessibilityRole="button" onPress={handleNewMatch} style={({ pressed }) => [styles.compactAction, pressed && styles.pressed]}>
               <Text style={styles.compactActionText}>New</Text>
             </Pressable>
-            <Pressable accessibilityRole="button" onPress={() => router.back()} style={({ pressed }) => [styles.compactAction, pressed && styles.pressed]}>
+            <Pressable accessibilityRole="button" onPress={() => router.replace("/")} style={({ pressed }) => [styles.compactAction, pressed && styles.pressed]}>
               <Text style={styles.compactActionText}>Exit</Text>
             </Pressable>
           </View>
@@ -316,6 +376,15 @@ export default function OfflineBotGameScreen() {
             <Text style={styles.matchScoreValue}>{matchScores.teamTwo}</Text>
           </View>
         </View>
+      </View>
+      <View style={{ gap: spacing.sm, marginBottom: spacing.md }}>
+        <Button variant="secondary" label={`Bot pace: ${botDelay === 250 ? 'Fast' : botDelay === 650 ? 'Normal' : 'Slow'}`} onPress={() => setBotDelay(botDelay === 250 ? 650 : botDelay === 650 ? 1500 : 250)} />
+        <Button variant="secondary" label={showDiagnostics ? 'Hide bot diagnostics' : 'Show bot diagnostics'} onPress={() => setShowDiagnostics(!showDiagnostics)} />
+        {showDiagnostics && deal.botDiagnostics ? <View style={styles.botDiagnosticsPanel}>
+          <Text style={styles.botDiagnosticsTitle}>{deal.botDiagnostics.decisionLabel}</Text>
+          <Text style={styles.botDiagnosticsReason}>{deal.botDiagnostics.reason}</Text>
+          {deal.botDiagnostics.candidates.map((candidate, index) => <Text key={index}>{candidate.label}: {candidate.score.toFixed(2)}</Text>)}
+        </View> : null}
       </View>
       <View style={styles.tablePanel}>
         <View style={styles.playerRow}>
@@ -410,7 +479,7 @@ export default function OfflineBotGameScreen() {
                     <Button label="New match" onPress={handleNewMatch} />
                   </View>
                   <View style={styles.turnAction}>
-                    <Button label="Dashboard" onPress={() => router.back()} variant="secondary" />
+                    <Button label="Offline Home" onPress={() => router.replace("/")} variant="secondary" />
                   </View>
                 </View>
               </View>

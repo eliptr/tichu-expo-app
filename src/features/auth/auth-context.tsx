@@ -12,13 +12,16 @@ type AuthContextValue = {
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-export function AuthProvider({ children }: PropsWithChildren) {
-  const [initializing, setInitializing] = useState(true);
+export function AuthProvider({ children, enabled = false }: PropsWithChildren<{ enabled?: boolean }>) {
+  const [initializing, setInitializing] = useState(enabled);
   const [session, setSession] = useState<Session | null>(null);
 
   useEffect(() => {
+    if (!enabled) { setSession(null); setInitializing(false); return; }
+    setInitializing(true);
     let mounted = true;
 
+    supabase.auth.startAutoRefresh();
     supabase.auth.getSession().then(({ data }) => {
       if (!mounted) {
         return;
@@ -26,7 +29,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
       setSession(data.session);
       setInitializing(false);
-    });
+    }).catch(() => { if (mounted) setInitializing(false); });
 
     const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
@@ -36,8 +39,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
     return () => {
       mounted = false;
       data.subscription.unsubscribe();
+      supabase.auth.stopAutoRefresh();
     };
-  }, []);
+  }, [enabled]);
 
   const value = useMemo(
     () => ({

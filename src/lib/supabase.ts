@@ -5,10 +5,6 @@ import 'react-native-url-polyfill/auto';
 
 import { env, hasSupabaseEnv } from './env';
 
-if (!hasSupabaseEnv()) {
-  console.warn('Missing Supabase environment variables. Copy .env.example to .env and fill in the hosted project values.');
-}
-
 const webStorage = {
   getItem: (key: string) => {
     if (typeof window === 'undefined') {
@@ -33,11 +29,25 @@ const webStorage = {
   },
 };
 
-export const supabase = createClient(env.supabaseUrl || 'https://example.supabase.co', env.supabaseAnonKey || 'placeholder', {
+function createSupabaseClient() {
+  if (!hasSupabaseEnv()) throw new Error("Online prototype requires Supabase configuration.");
+  return createClient(env.supabaseUrl || 'https://example.supabase.co', env.supabaseAnonKey || 'placeholder', {
   auth: {
     autoRefreshToken: true,
     detectSessionInUrl: false,
     persistSession: true,
     storage: Platform.OS === 'web' ? webStorage : AsyncStorage,
+  },
+});
+
+}
+
+let client: ReturnType<typeof createSupabaseClient> | undefined;
+// Route modules may be imported during export; access alone creates the client.
+export const supabase = new Proxy({} as ReturnType<typeof createSupabaseClient>, {
+  get(_target, property) {
+    client ??= createSupabaseClient();
+    const value = Reflect.get(client, property);
+    return typeof value === "function" ? value.bind(client) : value;
   },
 });

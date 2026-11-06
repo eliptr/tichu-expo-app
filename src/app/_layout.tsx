@@ -1,4 +1,8 @@
-import { Stack } from 'expo-router';
+import { Stack, usePathname, router } from 'expo-router';
+import { Text } from 'react-native';
+import { Screen } from '@/components/screen';
+import { Button } from '@/components/button';
+import { hasSupabaseEnv } from '@/lib/env';
 import { StatusBar } from 'expo-status-bar';
 
 import { AuthProvider } from '@/features/auth/auth-context';
@@ -7,8 +11,11 @@ import { initSentry, wrapWithSentry } from '@/lib/sentry';
 initSentry();
 
 function RootLayout() {
+  const pathname = usePathname();
+  const online = /^\/(auth|tabs|rooms|matches|settings|onboarding)(\/|$)/.test(pathname);
+  if (online && !hasSupabaseEnv()) return <Screen><Text>Online prototype is not configured. Offline games are ready to play.</Text><Button label="Offline Home" onPress={() => router.replace("/")} /></Screen>;
   return (
-    <AuthProvider>
+    <AuthProvider key={online ? "online" : "offline"} enabled={online}>
       <Stack screenOptions={{ headerShown: false }}>
         <Stack.Screen name="index" />
         <Stack.Screen name="onboarding/index" />
