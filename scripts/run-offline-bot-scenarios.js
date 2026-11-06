@@ -148,6 +148,24 @@ function cardIds(cards) {
 
 const scenarios = [
   {
+    name: 'bot card displays descend by rank across suits and special cards',
+    run() {
+      const cards = [
+        standardCard('star', '2'),
+        specialCard('phoenix'),
+        standardCard('jade', 'A'),
+        specialCard('mah-jong'),
+        standardCard('sword', 'K'),
+        specialCard('dragon'),
+        specialCard('dog'),
+      ];
+      const originalIds = cards.map((card) => card.id).join(' ');
+
+      expect(visibleCardList(cards) === 'Dragon Phoenix A\u2663 K\u2660 2\u2665 Dog Mah Jong', 'Expected highest cards first across suits.');
+      expect(cards.map((card) => card.id).join(' ') === originalIds, 'Expected the original hand order to stay intact.');
+    },
+  },
+  {
     name: 'passes when partner is already winning',
     run() {
       const partnerPlay = playFor('team_two_player_two', [standardCard('star', '7')]);

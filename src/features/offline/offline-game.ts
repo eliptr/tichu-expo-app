@@ -1,3 +1,4 @@
+import { sortCardsForHandDisplay } from '@/features/game/card-display';
 import { validatePlay } from '@/features/game/combination';
 import type { GameHand, TichuCard, TichuCombination } from '@/features/game/game-types';
 
@@ -1392,7 +1393,7 @@ export function advanceOfflineBotTurn(deal: OfflineDeal) {
 }
 
 export function visibleCardList(cards: TichuCard[]) {
-  return sortCards(cards).map(cardLabel).join(' ');
+  return sortCardsForHandDisplay(cards).reverse().map(cardLabel).join(' ');
 }
 
 export function offlineCapturedPointTotal(deal: OfflineDeal, seat: OfflineSeat) {
