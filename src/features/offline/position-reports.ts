@@ -1,10 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { OfflineDeal } from './offline-game';
+import type { OfflineBotVersion, OfflineDeal } from './offline-game';
 import type { OfflineSave } from './offline-storage';
 
 export type PositionReport = {
   version: 1;
-  engineVersion: 'heuristic-v1';
+  engineVersion: 'heuristic-v1' | OfflineBotVersion;
   id: string;
   createdAt: string;
   note: string;
@@ -14,7 +14,7 @@ export type PositionReport = {
 const key = 'tichu.position-reports.v1';
 let queue = Promise.resolve();
 export function capturePosition(position: OfflineSave, beforeLastBotMove: OfflineDeal | null): PositionReport {
-  return JSON.parse(JSON.stringify({ version: 1, engineVersion: 'heuristic-v1',
+  return JSON.parse(JSON.stringify({ version: 1, engineVersion: position.deal.botDiagnostics?.engineVersion ?? 'heuristic-v2',
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
     createdAt: new Date().toISOString(), note: '', position, beforeLastBotMove }));
 }

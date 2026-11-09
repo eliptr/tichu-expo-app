@@ -1,39 +1,20 @@
-const fs = require('fs');
-const Module = require('module');
-const path = require('path');
-const babel = require('@babel/core');
-
-const projectRoot = path.resolve(__dirname, '..');
-const srcRoot = path.join(projectRoot, 'src');
-const originalResolveFilename = Module._resolveFilename;
-
-Module._resolveFilename = function resolveAlias(request, parent, isMain, options) {
-  if (request.startsWith('@/')) {
-    return originalResolveFilename.call(this, path.join(srcRoot, request.slice(2)), parent, isMain, options);
-  }
-
-  return originalResolveFilename.call(this, request, parent, isMain, options);
-};
-
-require.extensions['.ts'] = function loadTypeScript(module, filename) {
-  const source = fs.readFileSync(filename, 'utf8');
-  const result = babel.transformSync(source, {
-    filename,
-    plugins: ['@babel/plugin-transform-typescript', '@babel/plugin-transform-modules-commonjs'],
-    sourceMaps: 'inline',
-  });
-
-  module._compile(result.code, filename);
-};
+require('./load-offline-engine');
 
 const {
   advanceOfflineBotTurn,
+  applyOfflineMove,
+  chooseFairOfflineBot,
+  liveOfflineBotSettings,
   generateOfflineLegalMoves,
+  observeOfflineBot,
   simulateOfflineMove,
   submitOfflinePlay,
   visibleCardList,
 } = require('../src/features/offline/offline-game');
 const { validatePlay } = require('../src/features/game/combination');
+const { chooseSearchOfflineBot, createOfflineSampler, rollOutOfflineHand } = require('../src/features/offline/offline-search');
+const { seededRandom } = require('./run-offline-self-play');
+const { phoenixReportView } = require('./run-phoenix-experiment');
 
 const seats = ['team_one_player_one', 'team_two_player_one', 'team_one_player_two', 'team_two_player_two'];
 const suits = ['jade', 'sword', 'pagoda', 'star'];
@@ -323,6 +304,83 @@ const scenarios = [
     },
   },
   {
+    name: 'Phoenix experiment can pass on the reported pair while preserving tactical exceptions',
+    run() {
+      const view = phoenixReportView();
+      const choose = (position, penalty) =>
+        chooseFairOfflineBot(position, undefined, { phoenixLooseSinglesPenalty: penalty });
+      const baseline = chooseFairOfflineBot(view);
+      expect(JSON.stringify(choose(view, 0)) === JSON.stringify(baseline), 'Zero penalty must reproduce fair-v2.');
+      expect(baseline.decision.action === 'play' && baseline.diagnostics.candidates[0].score === 87,
+        'Expected the recorded Phoenix pair with its original score.');
+      expect(choose(view, 40).decision.action === 'play', 'Expected the 40-point penalty to keep the Phoenix reply.');
+      expect(choose(view, 80).decision.action === 'play', 'Expected the 80-point penalty to keep the Phoenix reply.');
+      expect(choose(view, 120).decision.action === 'pass', 'Expected the 120-point penalty to pass.');
+      const chooseAgainstWinner = maxCards => chooseFairOfflineBot(view, undefined, {
+        phoenixLooseSinglesPenalty: 120,
+        phoenixLooseSinglesMaxWinnerCards: maxCards,
+      });
+      expect(chooseAgainstWinner(3).decision.action === 'play', 'The winning opponent has too many cards for this setting.');
+      expect(chooseAgainstWinner(4).decision.action === 'pass', 'The four-card opponent qualifies for the penalty.');
+
+      const finishing = {
+        ...view,
+        hand: view.hand.filter(card => card.id === 'phoenix' || card.id === 'sword-Q'),
+        handCounts: { ...view.handCounts, [view.seat]: 2 },
+      };
+      const mandatoryWish = { ...view, turnState: { ...view.turnState, wishRank: 'Q' } };
+      const urgent = { ...view, handCounts: { ...view.handCounts, [view.turnState.currentWinningSeat]: 1 } };
+      const straight = {
+        ...view,
+        hand: [
+          ...finishing.hand,
+          standardCard('jade', '5'),
+          standardCard('sword', '6'),
+          standardCard('jade', '7'),
+          standardCard('star', '8'),
+          standardCard('sword', '9'),
+        ],
+      };
+      for (const [name, position] of Object.entries({ finishing, mandatoryWish, urgent, straight })) {
+        const original = choose(position, 0);
+        expect(original.decision.action === 'play' && original.decision.cards.some(card => card.id === 'phoenix'),
+          `Expected a Phoenix reply in the ${name} scenario.`);
+        expect(JSON.stringify(choose(position, 120)) === JSON.stringify(original),
+          `The penalty must preserve the ${name} reply.`);
+      }
+    },
+  },
+  {
+    name: 'live bot passes to keep a strong play for weak singles',
+    run() {
+      const view = phoenixReportView();
+      const choose = position => chooseFairOfflineBot(position, undefined, liveOfflineBotSettings);
+      const guarded = choose(view);
+      expect(guarded.decision.action === 'pass', 'Expected the live heuristic to pass on the reported pair.');
+      expect(guarded.diagnostics.reason.includes('remaining weak singles'), 'Expected the bot to explain why it saved Phoenix.');
+      const searched = chooseSearchOfflineBot(view, { heuristicSettings: liveOfflineBotSettings });
+      expect(searched.decision.action === 'pass', 'Expected the experimental bot to pass on its early-turn fallback.');
+
+      const hasWinner = { ...view, hand: [...view.hand, standardCard('jade', 'A')] };
+      const urgent = { ...view, handCounts: { ...view.handCounts, [view.turnState.currentWinningSeat]: 1 } };
+      const wish = { ...view, turnState: { ...view.turnState, wishRank: 'Q' } };
+      const finishing = { ...view, hand: view.hand.filter(card => card.id === 'phoenix' || card.id === 'sword-Q') };
+      for (const position of [hasWinner, urgent, wish, finishing]) {
+        expect(choose(position).decision.action === 'play', 'Expected a strong reserve, urgent play, wish or finish to allow the reply.');
+      }
+
+      const winner = view.turnState.currentWinningSeat;
+      const single = {
+        ...view,
+        plays: [playFor(winner, [standardCard('sword', 'Q')], view.turnState.trickNumber)],
+        hand: [standardCard('jade', 'A'), standardCard('star', '3'), standardCard('jade', '5'), standardCard('pagoda', '8')],
+      };
+      expect(choose(single).decision.action === 'pass', 'Expected the bot to keep its last Ace when three weak singles would remain.');
+      const withPair = { ...single, hand: [...single.hand, standardCard('star', 'J'), standardCard('jade', 'J')] };
+      expect(choose(withPair).decision.action === 'play', 'Expected the Ace reply when a strong pair remains.');
+    },
+  },
+  {
     name: 'avoids Phoenix when partner is already winning',
     run() {
       const partnerPlay = playFor('team_two_player_two', [standardCard('star', 'A')]);
@@ -427,6 +485,41 @@ const scenarios = [
     },
   },
   {
+    name: 'leads the weak pair of threes ahead of a loose six',
+    run() {
+      const seat = 'team_two_player_two';
+      const hands = {
+        ...emptySeatCards(),
+        [seat]: [
+          standardCard('jade', '5'), standardCard('jade', '7'), standardCard('sword', '5'),
+          standardCard('sword', 'K'), standardCard('pagoda', '3'), standardCard('pagoda', '5'),
+          standardCard('pagoda', '6'), standardCard('star', '3'), standardCard('star', '8'),
+          standardCard('star', 'Q'), standardCard('star', 'K'),
+        ],
+      };
+      const deal = makeDeal({ currentSeat: seat, hands, trickNumber: 4 });
+      const { decision } = chooseFairOfflineBot(observeOfflineBot(deal, seat));
+      expect(decision.combo?.type === 'pair' && decision.combo.rank === 3, 'Expected the pair of threes first.');
+    },
+  },
+  {
+    name: 'leads a loose two while keeping tens and jacks together',
+    run() {
+      const seat = 'team_one_player_two';
+      const hands = {
+        ...emptySeatCards(),
+        [seat]: [
+          standardCard('sword', '2'), standardCard('sword', '5'), standardCard('sword', '10'),
+          standardCard('pagoda', '5'), standardCard('pagoda', '10'), standardCard('jade', 'J'),
+          standardCard('pagoda', 'J'), standardCard('star', 'K'),
+        ],
+      };
+      const deal = makeDeal({ currentSeat: seat, hands, trickNumber: 9 });
+      const { decision } = chooseFairOfflineBot(observeOfflineBot(deal, seat));
+      expect(cardIds(decision.cards ?? []).join(',') === 'sword-2', 'Expected to clear the two and keep the steps.');
+    },
+  },
+  {
     name: 'leads pair first when it leaves a clean straight finish',
     run() {
       const hands = {
@@ -519,6 +612,116 @@ const scenarios = [
       expect(simulated.plays.length === 2, 'Expected simulated pass to append a pass play.');
       expect(simulated.plays[1].action === 'pass', 'Expected simulated second play to be a pass.');
       expect(simulated.turnState.trickNumber === 2, 'Expected simulated pass to close the trick in this two-active-player setup.');
+    },
+  },
+  {
+    name: 'replays the reported pair-of-fives decision against a single 3',
+    run() {
+      const [human, left, partner, right] = seats;
+      const replayHand = (ids) => ids.split(' ').map((id) => {
+        const [suit, rank] = id.split('-');
+        return suits.includes(suit) ? standardCard(suit, rank) : specialCard(id);
+      });
+
+      // Rebuild the post-exchange hands and replay the two opening plays from the report.
+      const hands = {
+        [human]: replayHand('mah-jong jade-3 jade-4 jade-8 jade-J sword-2 sword-3 sword-K pagoda-3 pagoda-9 pagoda-K pagoda-A star-4 star-J'),
+        [left]: replayHand('jade-6 jade-7 jade-10 jade-Q jade-A sword-4 sword-9 sword-A pagoda-7 pagoda-J pagoda-Q star-3 star-6 star-9'),
+        [partner]: replayHand('jade-2 jade-5 jade-9 sword-5 sword-10 sword-Q pagoda-2 pagoda-6 pagoda-10 star-2 star-7 star-8 star-10 star-K'),
+        [right]: replayHand('dog phoenix dragon jade-K sword-6 sword-7 sword-8 sword-J pagoda-4 pagoda-5 pagoda-8 star-5 star-Q star-A'),
+      };
+      const start = makeDeal({ currentSeat: human, hands });
+      const afterLead = submitOfflinePlay(start, human, [hands[human][0]], '2');
+      const beforeChoice = submitOfflinePlay(afterLead, left, [standardCard('star', '3')]);
+      expect(beforeChoice.turnState.currentSeat === partner, 'Expected the reported decision to belong to Bot Partner.');
+
+      const handShapes = (deal) => {
+        const leads = generateOfflineLegalMoves(deal.hands[partner], null);
+        return {
+          hasPair: leads.some(({ combo }) => combo.type === 'pair' && combo.rank === 5),
+          hasStraight: leads.some(({ combo }) => combo.type === 'straight' && combo.count === 6 && combo.rank === 10),
+        };
+      };
+      const current = advanceOfflineBotTurn(beforeChoice);
+      expect(current.plays.length === 3 && current.plays[2].seat === partner, 'Expected the current bot to make a legal response.');
+      const preserved = handShapes(current);
+      expect(preserved.hasPair && preserved.hasStraight, 'Expected the bot to preserve both the pair of fives and the 5-10 straight.');
+      const { decisionLabel, candidates } = current.botDiagnostics;
+      console.log(`  Recorded: jade-5 (94); current: ${decisionLabel}`);
+      console.log(`  Current candidates: ${candidates.map(({ label, score }) => `${label} (${score})`).join(', ')}`);
+
+      const responses = generateOfflineLegalMoves(beforeChoice.hands[partner], beforeChoice.plays[1].combo, '2');
+      const alternatives = [
+        { cardId: 'jade-5', pair: false, straight: true },
+        { cardId: 'pagoda-6', pair: true, straight: false },
+        { cardId: null, pair: true, straight: true },
+      ];
+
+      for (const { cardId, pair, straight } of alternatives) {
+        const label = cardId ?? 'pass';
+        const move = cardId
+          ? responses.find(({ cards }) => cards.length === 1 && cards[0].id === cardId)
+          : { action: 'pass' };
+        expect(move, `Expected ${label} to be a legal response.`);
+        const result = simulateOfflineMove(beforeChoice, partner, move);
+        expect(result.plays.length === 3 && result.plays[2].action === move.action, `Expected ${label} to advance the replay.`);
+        expect(result.turnState.currentWinningSeat === (cardId ? partner : left), `Unexpected trick leader after ${label}.`);
+        expect(result.turnState.wishRank === '2', `Expected the wish to remain active after ${label}.`);
+
+        const { hasPair, hasStraight } = handShapes(result);
+        expect(hasPair === pair, `Unexpected pair of fives availability after ${label}.`);
+        expect(hasStraight === straight, `Unexpected 5-10 straight availability after ${label}.`);
+        console.log(`  ${label}: pair of 5s ${hasPair ? 'kept' : 'lost'}, 5-10 straight ${hasStraight ? 'kept' : 'lost'}`);
+      }
+
+      if (process.argv.includes('--compare-report')) {
+        const king = responses.find(move => move.cards.length === 1 && move.cards[0].id === 'star-K');
+        expect(king, 'Expected the King to be legal in the report.');
+        const sample = createOfflineSampler(observeOfflineBot(beforeChoice, partner));
+        const random = seededRandom(4242);
+        const totals = { king: 0, pass: 0 };
+        const differences = [];
+        for (let index = 0; index < 128; index += 1) {
+          const deal = sample(random);
+          expect(deal, 'Expected a sample consistent with the public wish and plays.');
+          const margin = (move) => {
+            const end = rollOutOfflineHand(applyOfflineMove(deal, partner, move));
+            expect(end?.scoreSummary, 'Expected the sampled hand to finish.');
+            return end.scoreSummary.teamOneScore - end.scoreSummary.teamTwoScore;
+          };
+          const kingPoints = margin(king);
+          const passPoints = margin({ action: 'pass' });
+          totals.king += kingPoints;
+          totals.pass += passPoints;
+          differences.push(kingPoints - passPoints);
+        }
+        const mean = (totals.king - totals.pass) / differences.length;
+        const halfWidth = 1.96 * Math.sqrt(differences.reduce((sum, points) => sum + (points - mean) ** 2, 0)
+          / ((differences.length - 1) * differences.length));
+        console.log(`  Same 128 sampled hands, estimated team margin: King ${(totals.king / 128).toFixed(1)}, pass ${(totals.pass / 128).toFixed(1)}.`);
+        console.log(`  King minus pass: ${mean.toFixed(1)} points (95% CI ${(mean - halfWidth).toFixed(1)} to ${(mean + halfWidth).toFixed(1)}).`);
+      }
+    },
+  },
+  {
+    name: 'preserves a triple on a routine reply but can split it under one-card pressure',
+    run() {
+      const [, bot, opponent] = seats;
+      const opponentPlay = playFor(opponent, [standardCard('star', '3')]);
+      const hands = {
+        ...emptySeatCards(),
+        [bot]: [standardCard('jade', '4'), standardCard('sword', '4'), standardCard('pagoda', '4'), standardCard('jade', '6')],
+        [opponent]: [standardCard('star', '7'), standardCard('star', '8')],
+      };
+      const setup = { currentSeat: bot, currentWinningSeat: opponent, plays: [opponentPlay] };
+      const routine = advanceOfflineBotTurn(makeDeal({ ...setup, hands }));
+      const urgent = advanceOfflineBotTurn(makeDeal({
+        ...setup,
+        hands: { ...hands, [opponent]: hands[opponent].slice(0, 1) },
+      }));
+
+      expect(cardIds(routine.botDiagnostics.decisionCards).join(',') === 'jade-6', 'Expected a loose 6 over splitting the triple on a routine reply.');
+      expect(urgent.botDiagnostics.decisionCards[0]?.rank === '4', 'Expected the split penalty to be waived against a one-card opponent.');
     },
   },
   {

@@ -37,7 +37,13 @@ export type OfflineBotCandidateScore = {
   cards: TichuCard[];
   label: string;
   score: number;
+  visits?: number;
 };
+
+export type OfflineBotVersion =
+  | 'heuristic-v2' | 'heuristic-v3' | 'heuristic-v4'
+  | 'fair-v1' | 'fair-v2' | 'fair-v3'
+  | 'ismcts-v1' | 'ismcts-v2' | 'ismcts-v3';
 
 export type OfflineBotDiagnostics = {
   candidates: OfflineBotCandidateScore[];
@@ -47,7 +53,11 @@ export type OfflineBotDiagnostics = {
   reason: string;
   seat: OfflineSeat;
   trickNumber: number;
+  engineVersion?: OfflineBotVersion;
+  search?: { iterations: number; elapsedMs: number; fallback?: 'outside-endgame' | 'forced-move' | 'no-sample' | 'no-result' };
 };
+
+type OfflineSearchSummary = Pick<OfflineBotDiagnostics, 'seat' | 'trickNumber'> & { iterations: number };
 
 export type OfflineTurnState = {
   currentSeat: OfflineSeat;
@@ -76,8 +86,10 @@ export type OfflineScoreSummary = {
 
 export type OfflineDeal = {
   botDiagnostics: OfflineBotDiagnostics | null;
+  lastBotSearch?: OfflineSearchSummary;
   botPlayers: OfflinePlayer[];
   finishOrder: OfflineSeat[];
+  outgoingCards?: Record<OfflineSeat, readonly OfflineKnownCard[]>;
   humanHand: TichuCard[];
   humanSeat: OfflineSeat;
   hands: OfflineHands;
@@ -89,10 +101,31 @@ export type OfflineDeal = {
   wonTricks: OfflineWonTricks;
 };
 
+type OfflineKnownCard = { card: TichuCard; toSeat: OfflineSeat };
+
+export type OfflineBotObservation = Pick<OfflineDeal, 'finishOrder' | 'plays' | 'wonCards' | 'wonTricks'> & {
+  turnState: OfflineTurnState;
+  seat: OfflineSeat;
+  hand: TichuCard[];
+  handCounts: Record<OfflineSeat, number>;
+  knownOutgoing: readonly OfflineKnownCard[];
+};
+
+type HeuristicView = OfflineBotObservation & { legacyHands?: OfflineHands };
+
+export type FairBotSettings = {
+  phoenixLooseSinglesPenalty?: number;
+  phoenixLooseSinglesMaxWinnerCards?: number;
+  protectTrickWinners?: boolean;
+};
+
+export const liveOfflineBotSettings: FairBotSettings = { protectTrickWinners: true };
+
 const suits: NonNullable<TichuCard['suit']>[] = ['jade', 'sword', 'pagoda', 'star'];
 const ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
 export const offlineWishRanks: OfflineWishRank[] = ['A', 'K', 'Q', 'J', '10', '9', '8', '7', '6', '5', '4', '3', '2'];
-const seats: OfflineSeat[] = ['team_one_player_one', 'team_two_player_one', 'team_one_player_two', 'team_two_player_two'];
+export const offlineSeats = ['team_one_player_one', 'team_two_player_one', 'team_one_player_two', 'team_two_player_two'] as const;
+const seats = offlineSeats;
 const teams: OfflineTeam[] = ['team_one', 'team_two'];
 const suitSymbols: Record<NonNullable<TichuCard['suit']>, string> = {
   jade: '♣',
@@ -113,7 +146,7 @@ function cardPoints(rank: string) {
   return 0;
 }
 
-function createDeck() {
+export function createOfflineDeck() {
   const standardCards = suits.flatMap((suit, suitIndex) =>
     ranks.map<TichuCard>((rank, rankIndex) => ({
       id: `${suit}-${rank}`,
@@ -136,11 +169,11 @@ function createDeck() {
   return [...standardCards, ...specialCards];
 }
 
-function shuffleDeck(deck: TichuCard[]) {
+export function shuffleOfflineCards(deck: TichuCard[], random: () => number) {
   const shuffled = [...deck];
 
   for (let index = shuffled.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1));
+    const swapIndex = Math.floor(random() * (index + 1));
     [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
   }
 
@@ -164,7 +197,7 @@ function teammateSeat(seat: OfflineSeat): OfflineSeat {
   }
 }
 
-function teamForSeat(seat: OfflineSeat): OfflineTeam {
+export function teamForSeat(seat: OfflineSeat): OfflineTeam {
   return seat === 'team_one_player_one' || seat === 'team_one_player_two' ? 'team_one' : 'team_two';
 }
 
@@ -277,16 +310,19 @@ function playId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function currentWinningPlay(deal: OfflineDeal) {
+function currentWinningPlay(deal: Pick<OfflineDeal, 'turnState' | 'plays'>) {
   const winningSeat = deal.turnState?.currentWinningSeat;
 
   if (!winningSeat || !deal.turnState) {
     return null;
   }
 
-  return [...deal.plays]
-    .reverse()
-    .find((play) => play.action === 'play' && play.seat === winningSeat && play.trickNumber === deal.turnState?.trickNumber) ?? null;
+  for (let index = deal.plays.length - 1; index >= 0; index -= 1) {
+    const play = deal.plays[index];
+    if (play.trickNumber < deal.turnState.trickNumber) break;
+    if (play.action === 'play' && play.seat === winningSeat && play.trickNumber === deal.turnState.trickNumber) return play;
+  }
+  return null;
 }
 
 function cardsForTrick(plays: OfflinePlay[], trickNumber: number) {
@@ -440,20 +476,59 @@ function scoreOfflineHand(hands: OfflineHands, wonCards: OfflineWonCards, finish
   };
 }
 
-function candidateCardGroups(hand: TichuCard[]) {
+function countBits(bits: number) {
+  let count = 0;
+  for (; bits !== 0; bits &= bits - 1) count += 1;
+  return count;
+}
+
+function candidateCardGroups(hand: TichuCard[], currentCombo: TichuCombination | null, requiredRank?: OfflineWishRank) {
   const groups: TichuCard[][] = [];
   const sortedHand = sortCards(hand);
   const groupCount = 2 ** sortedHand.length;
+  const groupRanks = new Uint16Array(groupCount);
+  const groupSizes = new Uint8Array(groupCount);
+  const cardRanks = sortedHand.map(card => 1 << cardRankValue(card));
+  const cardMask = (id: string) => {
+    const index = sortedHand.findIndex(card => card.id === id);
+    return index < 0 ? 0 : 1 << index;
+  };
+  const singlesOnly = cardMask('dragon') | cardMask('dog');
+  const phoenix = cardMask('phoenix');
+  const suitMasks = suits.map(suit => sortedHand.reduce((mask, card, index) => card.suit === suit ? mask | (1 << index) : mask, 0));
+  const requiredBit = requiredRank ? 1 << cardRankForWish(requiredRank) : 0;
 
   for (let mask = 1; mask < groupCount; mask += 1) {
-    const cards: TichuCard[] = [];
+    const previous = mask & (mask - 1);
+    const size = groupSizes[previous] + 1;
+    const rankMask = groupRanks[previous] | cardRanks[31 - Math.clz32(mask ^ previous)];
+    groupRanks[mask] = rankMask;
+    groupSizes[mask] = size;
+    if (requiredBit && !(rankMask & requiredBit)) continue;
 
-    for (let cardIndex = 0; cardIndex < sortedHand.length; cardIndex += 1) {
-      if (mask & (2 ** cardIndex)) {
-        cards.push(sortedHand[cardIndex]);
-      }
+    if (size > 1) {
+      if (mask & singlesOnly) continue;
+      const distinct = countBits(rankMask);
+      const hasPhoenix = Boolean(mask & phoenix);
+      const fixedRanks = hasPhoenix ? rankMask & ~1 : rankMask;
+      const span = Math.clz32(fixedRanks & -fixedRanks) - Math.clz32(fixedRanks) + 1;
+      const couldBeStraight = size >= 5 && distinct === size && span <= size;
+      const couldBeBomb = !hasPhoenix && ((size === 4 && distinct === 1) ||
+        (couldBeStraight && suitMasks.some(suitMask => (mask & suitMask) === mask)));
+      if (currentCombo && (currentCombo.is_bomb || currentCombo.count !== size) && !couldBeBomb) continue;
+      // Filter impossible shapes cheaply. validatePlay still decides ranks, suits and legality.
+      const couldBeRankGroup = size <= 3 && distinct === 1 + Number(hasPhoenix);
+      const couldBeFullHouse = size === 5 && distinct === 2 + Number(hasPhoenix);
+      const couldBePairs = size >= 4 && size % 2 === 0 && distinct === size / 2 + Number(hasPhoenix) && span === size / 2;
+      if (!couldBeBomb && !couldBeRankGroup && !couldBeFullHouse && !couldBeStraight && !couldBePairs) continue;
+    } else if (currentCombo && currentCombo.count !== 1) {
+      continue;
     }
 
+    const cards: TichuCard[] = [];
+    for (let bits = mask; bits !== 0; bits &= bits - 1) {
+      cards.push(sortedHand[31 - Math.clz32(bits & -bits)]);
+    }
     groups.push(cards);
   }
 
@@ -469,12 +544,17 @@ function candidateCardGroups(hand: TichuCard[]) {
   });
 }
 
+export function canFulfillOfflineWish(hand: TichuCard[], combo: TichuCombination | null, wishRank: OfflineWishRank) {
+  return hand.some(card => card.rank === wishRank) &&
+    candidateCardGroups(hand, combo, wishRank).some(cards => validatePlay(cards, combo).valid);
+}
+
 export function generateOfflineLegalMoves(
   hand: TichuCard[],
   currentCombo: TichuCombination | null,
   wishRank: OfflineWishRank | null = null
 ): OfflineLegalMove[] {
-  const moves = candidateCardGroups(hand)
+  const moves = candidateCardGroups(hand, currentCombo)
     .map((cards) => ({ cards, result: validatePlay(cards, currentCombo) }))
     .filter((candidate): candidate is { cards: TichuCard[]; result: TichuCombination } => candidate.result.valid)
     .map((candidate) => ({
@@ -524,11 +604,43 @@ function chooseMahJongWish(cards: TichuCard[]): OfflineWishRank {
   return offlineWishRanks.find((rank) => !playedRanks.has(rank)) ?? 'A';
 }
 
-function rankCount(cards: TichuCard[], rank: OfflineWishRank) {
+function rankCount(cards: TichuCard[], rank: string) {
   return cards.filter((card) => card.rank === rank).length;
 }
 
-function visiblePlayedRankCount(deal: OfflineDeal, rank: OfflineWishRank) {
+function rankIsInNaturalStraight(hand: TichuCard[], rank: number) {
+  const ranks = new Set(hand.filter((card) => card.kind === 'standard' || card.id === 'mah-jong').map(cardRankValue));
+  let low = rank;
+  let high = rank;
+
+  while (ranks.has(low - 1)) low -= 1;
+  while (ranks.has(high + 1)) high += 1;
+
+  return high - low + 1 >= 5;
+}
+
+function weakLooseSingles(hand: TichuCard[]) {
+  return hand.filter(card =>
+    card.kind === 'standard' && card.rank && cardRankValue(card) <= 10 &&
+    rankCount(hand, card.rank) === 1 && !rankIsInNaturalStraight(hand, cardRankValue(card))
+  ).length;
+}
+
+function isHighCombination(move: OfflineLegalMove) {
+  return move.combo.is_bomb || (move.combo.count > 1 && move.combo.rank >= 11);
+}
+
+function isStrongCard(card: TichuCard) {
+  return card.id === 'phoenix' || card.id === 'dragon' || cardRankValue(card) >= 13;
+}
+
+function spendsControlAndStrandsSingles(move: OfflineLegalMove, remainingHand: TichuCard[]) {
+  if (remainingHand.length < 3 || (!isHighCombination(move) && !move.cards.some(isStrongCard))) return false;
+  if (remainingHand.some(isStrongCard) || weakLooseSingles(remainingHand) < 3) return false;
+  return !generateOfflineLegalMoves(remainingHand, null).some(isHighCombination);
+}
+
+function visiblePlayedRankCount(deal: Pick<OfflineDeal, 'plays'>, rank: OfflineWishRank) {
   return deal.plays.reduce((sum, play) => sum + rankCount(play.cards, rank), 0);
 }
 
@@ -536,15 +648,15 @@ function opponentSeatsFor(seat: OfflineSeat) {
   return seats.filter((candidateSeat) => teamForSeat(candidateSeat) !== teamForSeat(seat));
 }
 
-function opponentNearOut(deal: OfflineDeal, seat: OfflineSeat, maxCards = 1) {
+function opponentNearOut(deal: HeuristicView, seat: OfflineSeat, maxCards = 1) {
   return opponentSeatsFor(seat).some(
-    (opponentSeat) => !deal.finishOrder.includes(opponentSeat) && deal.hands[opponentSeat].length > 0 && deal.hands[opponentSeat].length <= maxCards
+    (opponentSeat) => !deal.finishOrder.includes(opponentSeat) && deal.handCounts[opponentSeat] > 0 && deal.handCounts[opponentSeat] <= maxCards
   );
 }
 
-function teammateNearOut(deal: OfflineDeal, seat: OfflineSeat, maxCards = 2) {
+function teammateNearOut(deal: HeuristicView, seat: OfflineSeat, maxCards = 2) {
   const teammate = teammateSeat(seat);
-  const cardCount = deal.hands[teammate].length;
+  const cardCount = deal.handCounts[teammate];
 
   return !deal.finishOrder.includes(teammate) && cardCount > 0 && cardCount <= maxCards;
 }
@@ -555,33 +667,32 @@ function remainingCardsAfterMove(hand: TichuCard[], move: OfflineLegalMove) {
   return hand.filter((card) => !playedIds.has(card.id));
 }
 
-function lowLooseSingleCount(cards: TichuCard[]) {
-  const standardCards = cards.filter((card) => card.kind === 'standard');
-  const counts = new Map<number, number>();
+function breaksConsecutivePairs(hand: TichuCard[], move: OfflineLegalMove, remainingHand: TichuCard[]) {
+  const ranks = [...new Set(move.cards.filter(card => card.kind === 'standard').map(cardRankValue))];
+  const copies = (cards: TichuCard[], rank: number) =>
+    cards.filter(card => card.kind === 'standard' && cardRankValue(card) === rank).length;
 
-  standardCards.forEach((card) => {
-    const rank = cardRankValue(card);
-    counts.set(rank, (counts.get(rank) ?? 0) + 1);
-  });
-
-  return standardCards.filter((card) => cardRankValue(card) <= 7 && counts.get(cardRankValue(card)) === 1).length;
+  return ranks.some(rank => copies(hand, rank) >= 2 && copies(remainingHand, rank) < 2 &&
+    (copies(remainingHand, rank - 1) >= 2 || copies(remainingHand, rank + 1) >= 2));
 }
 
-function lowestLowLooseSingleRank(cards: TichuCard[]) {
-  const standardCards = cards.filter((card) => card.kind === 'standard');
-  const counts = new Map<number, number>();
+function quietLeadScore(hand: TichuCard[], move: OfflineLegalMove, remainingHand: TichuCard[]) {
+  if (remainingHand.length === 0 || containsCard(move, 'dog') || containsCard(move, 'mah-jong')) return 0;
 
-  standardCards.forEach((card) => {
-    const rank = cardRankValue(card);
-    counts.set(rank, (counts.get(rank) ?? 0) + 1);
-  });
-
-  const [lowestRank] = standardCards
-    .filter((card) => cardRankValue(card) <= 7 && counts.get(cardRankValue(card)) === 1)
-    .map(cardRankValue)
-    .sort((a, b) => a - b);
-
-  return lowestRank ?? null;
+  // Prefer weak leads while keeping combinations intact for when they are needed.
+  const allStandard = move.cards.every(card => card.kind === 'standard');
+  let score = -move.combo.count * 22;
+  if (allStandard) {
+    const highestRankSpent = Math.max(...move.cards.map(cardRankValue));
+    score += (8 - highestRankSpent) * 30;
+  }
+  if (move.combo.type === 'single' && move.cards[0].rank) {
+    const copies = rankCount(hand, move.cards[0].rank);
+    if (copies > 1) score -= 100;
+    else if (rankIsInNaturalStraight(hand, move.combo.rank)) score -= 65;
+  }
+  if (breaksConsecutivePairs(hand, move, remainingHand)) score -= 110;
+  return score + twoTurnExitPlanScore(move, remainingHand);
 }
 
 function cleanRemainingCombo(cards: TichuCard[]) {
@@ -607,33 +718,39 @@ function twoTurnExitPlanScore(move: OfflineLegalMove, remainingHand: TichuCard[]
   return 120 + remainingComboValue - firstMoveCost;
 }
 
-function leadLetsTeammateFinish(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMove) {
+function leadLetsTeammateFinish(deal: HeuristicView, seat: OfflineSeat, move: OfflineLegalMove) {
   const teammate = teammateSeat(seat);
-  const teammateHand = deal.hands[teammate];
+  if (deal.handCounts[teammate] === 0 || deal.handCounts[teammate] > 3 || deal.finishOrder.includes(teammate)) return false;
+  const teammateHand = deal.legacyHands?.[teammate] ?? deal.knownOutgoing
+    .filter(({ toSeat }) => toSeat === teammate)
+    .map(({ card }) => card);
 
-  if (deal.finishOrder.includes(teammate) || teammateHand.length === 0 || teammateHand.length > 3) {
+  if (teammateHand.length !== deal.handCounts[teammate]) {
     return false;
   }
 
   return validatePlay(teammateHand, move.combo).valid;
 }
 
-function isOpeningLead(deal: OfflineDeal) {
+function isOpeningLead(deal: HeuristicView) {
   return Boolean(deal.turnState && deal.turnState.trickNumber === 1 && deal.plays.length === 0 && !deal.turnState.currentWinningSeat);
 }
 
-function chooseBotMahJongWish(deal: OfflineDeal, seat: OfflineSeat, cards: TichuCard[]): OfflineWishRank {
+function chooseBotMahJongWish(deal: HeuristicView, seat: OfflineSeat, cards: TichuCard[]): OfflineWishRank {
   const playedRanks = new Set(cards.map((card) => card.rank).filter((rank): rank is OfflineWishRank => Boolean(rank)));
   const partner = teammateSeat(seat);
+  const knownCards = (recipient: OfflineSeat) => deal.knownOutgoing
+    .filter(({ toSeat }) => toSeat === recipient)
+    .map(({ card }) => card);
 
   const [bestRank] = offlineWishRanks
     .filter((rank) => !playedRanks.has(rank))
     .map((rank) => {
-      const partnerCount = rankCount(deal.hands[partner], rank);
-      const ownCount = rankCount(deal.hands[seat], rank);
+      const partnerCount = rankCount(deal.legacyHands?.[partner] ?? knownCards(partner), rank);
+      const ownCount = rankCount(deal.hand, rank);
       const opponentCount = seats
         .filter((candidateSeat) => teamForSeat(candidateSeat) !== teamForSeat(seat))
-        .reduce((sum, opponentSeat) => sum + rankCount(deal.hands[opponentSeat], rank), 0);
+        .reduce((sum, opponentSeat) => sum + rankCount(deal.legacyHands?.[opponentSeat] ?? knownCards(opponentSeat), rank), 0);
       const visibleCount = visiblePlayedRankCount(deal, rank) + (playedRanks.has(rank) ? 1 : 0);
 
       return {
@@ -652,13 +769,10 @@ function describeBotMove(move: OfflineLegalMove) {
   return `${move.combo.label}${wishLabel} - ${visibleCardList(move.cards)}`;
 }
 
-function scoreBotMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMove) {
-  const hand = deal.hands[seat];
+function scoreBotMove(deal: HeuristicView, seat: OfflineSeat, move: OfflineLegalMove, settings: FairBotSettings) {
+  const hand = deal.hand;
   const remainingCards = hand.length - move.cards.length;
   const remainingHand = remainingCardsAfterMove(hand, move);
-  const lowLooseSinglesLeft = lowLooseSingleCount(remainingHand);
-  const lowLooseSinglesBefore = lowLooseSingleCount(hand);
-  const lowestLowLooseRank = lowestLowLooseSingleRank(hand);
   const winningPlay = currentWinningPlay(deal);
   const currentTrickPoints = deal.turnState ? cardPointTotal(cardsForTrick(deal.plays, deal.turnState.trickNumber)) : 0;
   const teammateIsWinning = Boolean(winningPlay && teamForSeat(winningPlay.seat) === teamForSeat(seat));
@@ -677,6 +791,7 @@ function scoreBotMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMo
     winningPlay?.combo && opponentHasNearOutThreat && winningPlay.combo.type === 'single' && winningPlay.combo.rank < 14
   );
   let score = 0;
+  const phoenixLooseSinglesPenalty = settings.phoenixLooseSinglesPenalty ?? 0;
 
   if (activeWishRank && cardsContainWishRank(move.cards, activeWishRank)) {
     score = 220;
@@ -730,25 +845,8 @@ function scoreBotMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMo
       score += 380;
     }
 
-    if (quietLead && move.combo.type === 'single' && lowLooseSinglesBefore > 0) {
-      score += 95;
-
-      if (lowestLowLooseRank !== null && move.combo.rank === lowestLowLooseRank) {
-        score += 80;
-      }
-    }
-
-    if (quietLead && remainingCards > 0) {
-      score += twoTurnExitPlanScore(move, remainingHand);
-    }
-
-    if (quietLead && move.combo.count >= 2 && lowLooseSinglesBefore > 0 && !containsCard(move, 'mah-jong')) {
-      score -= move.combo.count * 20;
-      score -= Math.max(0, cardPointTotal(move.cards)) * 0.8;
-    }
-
-    if (quietLead && move.combo.count >= 3 && lowLooseSinglesLeft > 0) {
-      score -= lowLooseSinglesLeft * 95;
+    if (quietLead) {
+      score += quietLeadScore(hand, move, remainingHand);
     }
 
     if (opponentIsNearOut) {
@@ -773,6 +871,14 @@ function scoreBotMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMo
 
     if (opponentNearOutPressure) {
       score += 150;
+    } else if (move.combo.type === 'single' && move.cards[0]?.rank) {
+      const copies = rankCount(hand, move.cards[0].rank);
+
+      if (copies === 2 || copies === 3) {
+        score -= 8;
+      } else if (copies === 1 && rankIsInNaturalStraight(hand, move.combo.rank)) {
+        score -= 12;
+      }
     }
   }
 
@@ -792,8 +898,18 @@ function scoreBotMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMo
     }
   }
 
+  if (settings.protectTrickWinners && !opponentIsNearOut && !leadFinishesTeammate &&
+      spendsControlAndStrandsSingles(move, remainingHand)) {
+    score -= 160;
+  }
+
   if (containsCard(move, 'phoenix')) {
     score += remainingCards === 0 ? 45 : -55;
+
+    if (phoenixLooseSinglesPenalty > 0 && opponentIsWinning && !opponentIsNearOut &&
+        remainingCards >= 3 && weakLooseSingles(remainingHand) >= 3) {
+      score -= phoenixLooseSinglesPenalty;
+    }
 
     if (move.cards.length === 1) {
       score += remainingCards === 0 ? 0 : -110;
@@ -806,7 +922,7 @@ function scoreBotMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMo
 
   if (containsCard(move, 'dog')) {
     const teammate = teammateSeat(seat);
-    const teammateCanLead = deal.hands[teammate].length > 0 && !deal.finishOrder.includes(teammate);
+    const teammateCanLead = deal.handCounts[teammate] > 0 && !deal.finishOrder.includes(teammate);
     const hasOpeningMahJong = openingLead && hand.some((card) => card.id === 'mah-jong');
     score += teammateCanLead ? (hasOpeningMahJong ? 90 : 360) : -160;
 
@@ -822,8 +938,8 @@ function scoreBotMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMo
   return score;
 }
 
-function scoredBotMoves(deal: OfflineDeal, seat: OfflineSeat) {
-  return generateOfflineLegalMoves(deal.hands[seat], currentWinningPlay(deal)?.combo ?? null, deal.turnState?.wishRank ?? null)
+function scoredBotMoves(deal: HeuristicView, seat: OfflineSeat, moves: OfflineLegalMove[], settings: FairBotSettings) {
+  return moves
     .map((move) =>
       containsCard(move, 'mah-jong')
         ? {
@@ -834,7 +950,7 @@ function scoredBotMoves(deal: OfflineDeal, seat: OfflineSeat) {
     )
     .map((move) => ({
       move,
-      score: scoreBotMove(deal, seat, move),
+      score: scoreBotMove(deal, seat, move, settings),
     }))
     .sort((a, b) => {
       if (b.score !== a.score) {
@@ -858,7 +974,7 @@ function diagnosticCandidates(scoredMoves: ReturnType<typeof scoredBotMoves>) {
 }
 
 function passDecision(
-  deal: OfflineDeal,
+  deal: HeuristicView,
   seat: OfflineSeat,
   reason: string,
   scoredMoves: ReturnType<typeof scoredBotMoves> = []
@@ -878,7 +994,7 @@ function passDecision(
 }
 
 function playDecision(
-  deal: OfflineDeal,
+  deal: HeuristicView,
   seat: OfflineSeat,
   move: OfflineLegalMove,
   reason: string,
@@ -898,10 +1014,10 @@ function playDecision(
   };
 }
 
-function moveReason(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMove) {
+function moveReason(deal: HeuristicView, seat: OfflineSeat, move: OfflineLegalMove) {
   const winningPlay = currentWinningPlay(deal);
 
-  if (move.cards.length === deal.hands[seat].length) {
+  if (move.cards.length === deal.hand.length) {
     return 'Best score because it empties the hand.';
   }
 
@@ -925,10 +1041,6 @@ function moveReason(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMove
     return 'Best score because it sets partner up to finish.';
   }
 
-  if (!winningPlay && move.combo.type === 'single' && lowLooseSingleCount(deal.hands[seat]) >= 2) {
-    return 'Best score because it clears a weak single before shedding bigger combinations.';
-  }
-
   if (move.combo.is_bomb) {
     return 'Best score because the trick is valuable enough to spend a bomb.';
   }
@@ -937,8 +1049,14 @@ function moveReason(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMove
     return 'Best score because it pressures an opponent who is nearly out.';
   }
 
-  if (!winningPlay && cleanRemainingCombo(remainingCardsAfterMove(deal.hands[seat], move))) {
+  if (!winningPlay && cleanRemainingCombo(remainingCardsAfterMove(deal.hand, move))) {
     return 'Best score because it creates a two-play exit plan.';
+  }
+
+  if (!winningPlay && move.cards.every(card => card.kind === 'standard' && cardRankValue(card) <= 7)) {
+    return move.combo.type === 'single'
+      ? 'Best score because it clears a weak single.'
+      : 'Best score because it sheds a weak combination.';
   }
 
   if (winningPlay && teamForSeat(winningPlay.seat) !== teamForSeat(seat)) {
@@ -948,11 +1066,63 @@ function moveReason(deal: OfflineDeal, seat: OfflineSeat, move: OfflineLegalMove
   return 'Best score by shedding cards while preserving stronger resources.';
 }
 
-function chooseOfflineBotDecision(deal: OfflineDeal, seat: OfflineSeat): { decision: OfflineBotDecision; diagnostics: OfflineBotDiagnostics } {
-  const currentCombo = currentWinningPlay(deal)?.combo ?? null;
-  const scoredMoves = scoredBotMoves(deal, seat);
-  const moves = scoredMoves.map(({ move }) => move);
+export function observeOfflineBot(deal: OfflineDeal, seat: OfflineSeat): OfflineBotObservation {
+  if (!deal.turnState || deal.turnState.currentSeat !== seat) {
+    throw new Error('A bot observation requires its active turn.');
+  }
+
+  return {
+    seat,
+    hand: deal.hands[seat],
+    handCounts: {
+      team_one_player_one: deal.hands.team_one_player_one.length,
+      team_one_player_two: deal.hands.team_one_player_two.length,
+      team_two_player_one: deal.hands.team_two_player_one.length,
+      team_two_player_two: deal.hands.team_two_player_two.length,
+    },
+    knownOutgoing: deal.outgoingCards?.[seat]?.filter(
+      ({ card }) => !deal.plays.some(play => play.cards.some(played => played.id === card.id))
+    ) ?? [],
+    finishOrder: deal.finishOrder,
+    plays: deal.plays,
+    turnState: deal.turnState,
+    wonCards: deal.wonCards,
+    wonTricks: deal.wonTricks,
+  };
+}
+
+export function legalOfflineBotActions(view: OfflineBotObservation): OfflineSimulationMove[] {
+  const winningPlay = currentWinningPlay(view);
+  const { wishRank } = view.turnState;
+  const moves = generateOfflineLegalMoves(view.hand, winningPlay?.combo ?? null, wishRank);
+  if (winningPlay && !moves.some(move => cardsContainWishRank(move.cards, wishRank))) {
+    return [...moves, { action: 'pass' }];
+  }
+  return moves;
+}
+
+function chooseHeuristicDecision(
+  deal: HeuristicView,
+  actions = legalOfflineBotActions(deal),
+  settings: FairBotSettings = {}
+): { decision: OfflineBotDecision; diagnostics: OfflineBotDiagnostics } {
+  const { seat } = deal;
   const winningPlay = currentWinningPlay(deal);
+  const currentCombo = winningPlay?.combo ?? null;
+  const appliesToWinner = winningPlay &&
+    deal.handCounts[winningPlay.seat] <= (settings.phoenixLooseSinglesMaxWinnerCards ?? Infinity);
+  const scoredMoves = scoredBotMoves(
+    deal,
+    seat,
+    actions.filter(move => move.action === 'play'),
+    {
+      ...settings,
+      phoenixLooseSinglesPenalty: appliesToWinner && actions.some(move => move.action === 'pass')
+        ? settings.phoenixLooseSinglesPenalty
+        : 0,
+    }
+  );
+  const moves = scoredMoves.map(({ move }) => move);
 
   if (moves.length === 0) {
     return passDecision(deal, seat, 'No legal move can beat the current table.');
@@ -965,7 +1135,7 @@ function chooseOfflineBotDecision(deal: OfflineDeal, seat: OfflineSeat): { decis
   }
 
   if (winningPlay && teamForSeat(winningPlay.seat) === teamForSeat(seat)) {
-    const finishingMoves = moves.filter((move) => move.cards.length === deal.hands[seat].length);
+      const finishingMoves = moves.filter((move) => move.cards.length === deal.hand.length);
 
     if (finishingMoves.length === 0) {
       return passDecision(deal, seat, 'Partner is winning, so the bot stays out of the way.', scoredMoves);
@@ -975,10 +1145,30 @@ function chooseOfflineBotDecision(deal: OfflineDeal, seat: OfflineSeat): { decis
   const [bestMove] = scoredMoves;
 
   if (currentCombo && bestMove.score < 1) {
+    if (settings.protectTrickWinners && !opponentNearOut(deal, seat) &&
+        spendsControlAndStrandsSingles(bestMove.move, remainingCardsAfterMove(deal.hand, bestMove.move))) {
+      return passDecision(deal, seat, 'Passing keeps a strong play available for the remaining weak singles.', scoredMoves);
+    }
     return passDecision(deal, seat, 'Top move scored poorly, so passing keeps stronger cards.', scoredMoves);
   }
 
   return playDecision(deal, seat, bestMove.move, moveReason(deal, seat, bestMove.move), scoredMoves);
+}
+
+function chooseOfflineBotDecision(deal: OfflineDeal, seat: OfflineSeat, settings?: FairBotSettings) {
+  const result = chooseHeuristicDecision({ ...observeOfflineBot(deal, seat), legacyHands: deal.hands }, undefined, settings);
+  result.diagnostics.engineVersion = settings?.protectTrickWinners ? 'heuristic-v4' : 'heuristic-v3';
+  return result;
+}
+
+export function chooseLiveOfflineBot(deal: OfflineDeal, seat: OfflineSeat) {
+  return chooseOfflineBotDecision(deal, seat, liveOfflineBotSettings);
+}
+
+export function chooseFairOfflineBot(view: OfflineBotObservation, actions?: OfflineSimulationMove[], settings?: FairBotSettings) {
+  const result = chooseHeuristicDecision(view, actions, settings);
+  result.diagnostics.engineVersion = settings?.protectTrickWinners ? 'fair-v3' : 'fair-v2';
+  return result;
 }
 
 function refreshDeal(deal: OfflineDeal, nextHands: OfflineHands): OfflineDeal {
@@ -1089,18 +1279,20 @@ export function cloneOfflineDeal(deal: OfflineDeal): OfflineDeal {
   };
 }
 
-export function simulateOfflineMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineSimulationMove): OfflineDeal {
-  const clonedDeal = cloneOfflineDeal(deal);
-
+export function applyOfflineMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineSimulationMove): OfflineDeal {
   if (move.action === 'pass') {
-    return submitOfflinePass(clonedDeal, seat);
+    return submitOfflinePass(deal, seat);
   }
 
-  return submitOfflinePlay(clonedDeal, seat, move.cards, move.wishRank);
+  return submitOfflinePlay(deal, seat, move.cards, move.wishRank);
 }
 
-export function createOfflineDeal(): OfflineDeal {
-  const deck = shuffleDeck(createDeck());
+export function simulateOfflineMove(deal: OfflineDeal, seat: OfflineSeat, move: OfflineSimulationMove): OfflineDeal {
+  return applyOfflineMove(cloneOfflineDeal(deal), seat, move);
+}
+
+export function createOfflineDeal(random = Math.random): OfflineDeal {
+  const deck = shuffleOfflineCards(createOfflineDeck(), random);
   const hands = {} as OfflineHands;
 
   seats.forEach((seat, seatIndex) => {
@@ -1125,11 +1317,13 @@ export function createOfflineDeal(): OfflineDeal {
   };
 }
 
-export function applyOfflinePassing(deal: OfflineDeal, humanPassSelection: OfflinePassSelection): OfflineDeal {
+export function applyOfflinePassing(deal: OfflineDeal, humanPassSelection?: OfflinePassSelection): OfflineDeal {
   const passSelections = {} as Record<OfflineSeat, OfflinePassSelection>;
 
   seats.forEach((seat) => {
-    passSelections[seat] = seat === deal.humanSeat ? humanPassSelection : botPassSelection(deal.hands[seat]);
+    passSelections[seat] = seat === deal.humanSeat && humanPassSelection
+      ? humanPassSelection
+      : botPassSelection(deal.hands[seat]);
   });
 
   const outgoingCards = seats.flatMap((seat) =>
@@ -1150,9 +1344,12 @@ export function applyOfflinePassing(deal: OfflineDeal, humanPassSelection: Offli
   );
 
   const nextHands = {} as OfflineHands;
+  const knownOutgoing = {} as NonNullable<OfflineDeal['outgoingCards']>;
 
   seats.forEach((seat) => {
-    const outgoingIds = new Set(outgoingCards.filter((pass) => pass.fromSeat === seat).map((pass) => pass.card.id));
+    const sent = outgoingCards.filter(pass => pass.fromSeat === seat);
+    knownOutgoing[seat] = sent.map(({ card, toSeat }) => ({ card, toSeat }));
+    const outgoingIds = new Set(sent.map((pass) => pass.card.id));
     const keptCards = deal.hands[seat].filter((card) => !outgoingIds.has(card.id));
     const incomingCards = outgoingCards.filter((pass) => pass.toSeat === seat).map((pass) => pass.card);
     nextHands[seat] = sortCards([...keptCards, ...incomingCards]);
@@ -1162,6 +1359,7 @@ export function applyOfflinePassing(deal: OfflineDeal, humanPassSelection: Offli
     botDiagnostics: null,
     botPlayers: createBotPlayers(nextHands),
     finishOrder: [],
+    outgoingCards: knownOutgoing,
     hands: nextHands,
     humanHand: nextHands[deal.humanSeat],
     humanSeat: deal.humanSeat,
@@ -1194,10 +1392,15 @@ export function submitOfflinePlay(
     return deal;
   }
 
+  const playedIds = new Set(cards.map(card => card.id));
+  if (playedIds.size !== cards.length || cards.some(card => !deal.hands[seat].some(held => held.id === card.id))) {
+    throw new Error('Play distinct cards from your own hand.');
+  }
+
   const currentCombo = currentWinningPlay(deal)?.combo ?? null;
   const activeWishRank = deal.turnState.wishRank;
   const canSatisfyWish = activeWishRank
-    ? generateOfflineLegalMoves(deal.hands[seat], currentCombo, null).some((move) => cardsContainWishRank(move.cards, activeWishRank))
+    ? canFulfillOfflineWish(deal.hands[seat], currentCombo, activeWishRank)
     : false;
 
   if (canSatisfyWish && !cardsContainWishRank(cards, activeWishRank)) {
@@ -1216,7 +1419,6 @@ export function submitOfflinePlay(
     : cardsContainWishRank(cards, activeWishRank)
       ? null
       : activeWishRank;
-  const playedIds = new Set(cards.map((card) => card.id));
   const nextHands: OfflineHands = {
     ...deal.hands,
     [seat]: sortCards(deal.hands[seat].filter((card) => !playedIds.has(card.id))),
@@ -1301,7 +1503,7 @@ export function submitOfflinePass(deal: OfflineDeal, seat: OfflineSeat) {
   const activeWishRank = deal.turnState.wishRank;
   const currentCombo = currentWinningPlay(deal)?.combo ?? null;
   const canSatisfyWish = activeWishRank
-    ? generateOfflineLegalMoves(deal.hands[seat], currentCombo, null).some((move) => cardsContainWishRank(move.cards, activeWishRank))
+    ? canFulfillOfflineWish(deal.hands[seat], currentCombo, activeWishRank)
     : false;
 
   if (canSatisfyWish) {
@@ -1360,8 +1562,8 @@ export function submitOfflinePass(deal: OfflineDeal, seat: OfflineSeat) {
   };
 }
 
-export function advanceOfflineBotTurn(deal: OfflineDeal) {
-  if (!deal.turnState || deal.status !== 'playing' || deal.turnState.currentSeat === deal.humanSeat) {
+export function advanceOfflineBotTurn(deal: OfflineDeal, chooseBot = chooseOfflineBotDecision, includeHumanSeat = false) {
+  if (!deal.turnState || deal.status !== 'playing' || (!includeHumanSeat && deal.turnState.currentSeat === deal.humanSeat)) {
     return deal;
   }
 
@@ -1377,18 +1579,16 @@ export function advanceOfflineBotTurn(deal: OfflineDeal) {
     };
   }
 
-  const { decision, diagnostics } = chooseOfflineBotDecision(deal, botSeat);
-
-  if (decision.action === 'play') {
-    return {
-      ...submitOfflinePlay(deal, botSeat, decision.cards, decision.wishRank),
-      botDiagnostics: diagnostics,
-    };
-  }
+  const { decision, diagnostics } = chooseBot(deal, botSeat);
+  const iterations = diagnostics.search?.iterations ?? 0;
+  const lastBotSearch = iterations > 0
+    ? { iterations, seat: botSeat, trickNumber: diagnostics.trickNumber }
+    : deal.lastBotSearch;
 
   return {
-    ...submitOfflinePass(deal, botSeat),
+    ...applyOfflineMove(deal, botSeat, decision),
     botDiagnostics: diagnostics,
+    lastBotSearch,
   };
 }
 

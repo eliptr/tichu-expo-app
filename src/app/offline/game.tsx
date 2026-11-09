@@ -11,13 +11,17 @@ import { colors, spacing } from '@/constants/ui';
 import { sortCardsForHandDisplay } from '@/features/game/card-display';
 import { validatePlay } from '@/features/game/combination';
 import type { TichuCard } from '@/features/game/game-types';
+import { chooseSearchOfflineBot } from '@/features/offline/offline-search';
 import {
   advanceOfflineBotTurn,
   applyOfflinePassing,
+  chooseLiveOfflineBot,
   createOfflineDeal,
   currentOfflineTrickPlays,
   currentOfflineWinningPlay,
   generateOfflineLegalMoves,
+  liveOfflineBotSettings,
+  observeOfflineBot,
   offlineWishRanks,
   submitOfflinePass,
   submitOfflinePlay,
@@ -28,6 +32,13 @@ import {
   type PassDirection,
   type OfflineWishRank,
 } from '@/features/offline/offline-game';
+
+const experimentalBot = __DEV__ && process.env.EXPO_PUBLIC_TICHU_EXPERIMENTAL_BOT === '1'
+  ? (deal: OfflineDeal, seat: OfflineSeat) => chooseSearchOfflineBot(observeOfflineBot(deal, seat), {
+      budgetMs: 100,
+      heuristicSettings: liveOfflineBotSettings,
+    })
+  : undefined;
 
 type MatchTargetScore = 500 | 1000 | 2000;
 type MatchScores = {
@@ -48,6 +59,12 @@ const emptyMatchScores: MatchScores = { teamOne: 0, teamTwo: 0 };
 const handCardOverlap = 8;
 const handGridLeftPadding = 10;
 const handGridColumns = 7;
+const searchFallbackText = {
+  'outside-endgame': 'This turn was too early for search.',
+  'forced-move': 'Search skipped because there was only one legal move.',
+  'no-sample': 'Search could not sample a possible deal in time.',
+  'no-result': 'Search did not complete a simulation on this turn.',
+};
 
 export default function OfflineBotGameScreen() {
   const { width } = useWindowDimensions();
@@ -105,6 +122,9 @@ export default function OfflineBotGameScreen() {
   }, [hydrated, deal, targetScore, matchScores, handNumber, scoredHandNumber, botDelay, showDiagnostics]);
 
   const displayHand = useMemo(() => sortCardsForHandDisplay(deal.humanHand), [deal.humanHand]);
+  const latestSearch = deal.botDiagnostics?.search;
+  const lastSearch = deal.lastBotSearch;
+  const lastSearchBot = lastSearch && deal.botPlayers.find(bot => bot.seat === lastSearch.seat);
   const canPass = deal.status === 'dealt';
   const isFinished = deal.status === 'finished';
   const isPlaying = deal.status === 'playing';
@@ -169,7 +189,7 @@ export default function OfflineBotGameScreen() {
 
     const timeoutId = setTimeout(() => {
       lastBotPosition.current = deal;
-      setDeal(advanceOfflineBotTurn(deal));
+      setDeal(advanceOfflineBotTurn(deal, experimentalBot ?? chooseLiveOfflineBot));
     }, botDelay);
 
     return () => clearTimeout(timeoutId);
@@ -380,10 +400,19 @@ export default function OfflineBotGameScreen() {
       <View style={{ gap: spacing.sm, marginBottom: spacing.md }}>
         <Button variant="secondary" label={`Bot pace: ${botDelay === 250 ? 'Fast' : botDelay === 650 ? 'Normal' : 'Slow'}`} onPress={() => setBotDelay(botDelay === 250 ? 650 : botDelay === 650 ? 1500 : 250)} />
         <Button variant="secondary" label={showDiagnostics ? 'Hide bot diagnostics' : 'Show bot diagnostics'} onPress={() => setShowDiagnostics(!showDiagnostics)} />
-        {showDiagnostics && deal.botDiagnostics ? <View style={styles.botDiagnosticsPanel}>
-          <Text style={styles.botDiagnosticsTitle}>{deal.botDiagnostics.decisionLabel}</Text>
-          <Text style={styles.botDiagnosticsReason}>{deal.botDiagnostics.reason}</Text>
-          {deal.botDiagnostics.candidates.map((candidate, index) => <Text key={index}>{candidate.label}: {candidate.score.toFixed(2)}</Text>)}
+        {showDiagnostics && (experimentalBot || deal.botDiagnostics) ? <View style={styles.botDiagnosticsPanel}>
+          {lastSearch && !latestSearch?.iterations ? (
+            <Text style={styles.botDiagnosticsReason}>
+              Last search · {lastSearchBot?.name ?? 'Bot'} ran {lastSearch.iterations} simulations on trick {lastSearch.trickNumber}.
+            </Text>
+          ) : null}
+          {latestSearch?.fallback ? <Text style={styles.botDiagnosticsReason}>{searchFallbackText[latestSearch.fallback]}</Text> : null}
+          {!deal.botDiagnostics && experimentalBot ? <Text style={styles.botDiagnosticsReason}>Search is enabled for late turns.</Text> : null}
+          {deal.botDiagnostics ? <>
+            <Text style={styles.botDiagnosticsTitle}>{deal.botDiagnostics.decisionLabel}</Text>
+            <Text style={styles.botDiagnosticsReason}>{deal.botDiagnostics.reason}</Text>
+            {deal.botDiagnostics.candidates.map((candidate, index) => <Text key={index}>{candidate.label}: {candidate.score.toFixed(2)}{candidate.visits ? ` (${candidate.visits} visits)` : ''}</Text>)}
+          </> : null}
         </View> : null}
       </View>
       <View style={styles.tablePanel}>

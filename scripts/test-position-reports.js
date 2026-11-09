@@ -14,13 +14,23 @@ const { capturePosition, loadPositionReports, storePositionReport, removePositio
   const position = { deal: { hands: { one: [{ id: 'jade-2' }] }, plays: [], botDiagnostics: { reason: 'pass' } }, handNumber: 1 };
   const before = { hands: { one: [{ id: 'jade-3' }] } };
   const report = capturePosition(position, before);
+  assert.equal(report.engineVersion, 'heuristic-v2');
+  const searchReport = capturePosition({
+    ...position,
+    deal: {
+      ...position.deal,
+      botDiagnostics: { engineVersion: 'ismcts-v1', search: { iterations: 64, elapsedMs: 10 } },
+    },
+  }, before);
+  assert.equal(searchReport.engineVersion, 'ismcts-v1');
+  assert.equal(JSON.parse(exportPositionReport(searchReport)).position.deal.botDiagnostics.search.iterations, 64);
   position.deal.hands.one[0].id = 'changed'; before.hands.one.length = 0;
   assert.equal(report.position.deal.hands.one[0].id, 'jade-2');
   assert.equal(report.beforeLastBotMove.hands.one.length, 1);
   assert.deepEqual(JSON.parse(exportPositionReport(report)), report);
   assert.deepEqual(await loadPositionReports(), []);
-  await Promise.all([storePositionReport(report), storePositionReport({ ...report, id: 'second' })]);
-  assert.equal((await loadPositionReports()).length, 2);
+  await Promise.all([storePositionReport(report), storePositionReport({ ...report, id: 'second', engineVersion: 'heuristic-v1' })]);
+  assert.deepEqual((await loadPositionReports()).map(item => item.engineVersion), ['heuristic-v1', 'heuristic-v2']);
   await storePositionReport(report);
   assert.equal((await loadPositionReports()).length, 2);
   fail = true;

@@ -49,3 +49,6 @@ example
 
 .vercel
 .env*
+
+# Local bot experiment results
+/experiment-results/
