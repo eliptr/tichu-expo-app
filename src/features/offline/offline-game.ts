@@ -41,7 +41,7 @@ export type OfflineBotCandidateScore = {
 };
 
 export type OfflineBotVersion =
-  | 'heuristic-v2' | 'heuristic-v3' | 'heuristic-v4'
+  | 'heuristic-v2' | 'heuristic-v3' | 'heuristic-v4' | 'heuristic-v5'
   | 'fair-v1' | 'fair-v2' | 'fair-v3'
   | 'ismcts-v1' | 'ismcts-v2' | 'ismcts-v3';
 
@@ -117,6 +117,8 @@ export type FairBotSettings = {
   phoenixLooseSinglesPenalty?: number;
   phoenixLooseSinglesMaxWinnerCards?: number;
   protectTrickWinners?: boolean;
+  opponentReplyThreshold?: number;
+  replyPlayPenalty?: (move: OfflineLegalMove) => number;
 };
 
 export const liveOfflineBotSettings: FairBotSettings = { protectTrickWinners: true };
@@ -634,10 +636,25 @@ function isStrongCard(card: TichuCard) {
   return card.id === 'phoenix' || card.id === 'dragon' || cardRankValue(card) >= 13;
 }
 
+function hasStrongReserve(hand: TichuCard[]) {
+  return hand.some(isStrongCard) || generateOfflineLegalMoves(hand, null).some(isHighCombination);
+}
+
 function spendsControlAndStrandsSingles(move: OfflineLegalMove, remainingHand: TichuCard[]) {
   if (remainingHand.length < 3 || (!isHighCombination(move) && !move.cards.some(isStrongCard))) return false;
   if (remainingHand.some(isStrongCard) || weakLooseSingles(remainingHand) < 3) return false;
   return !generateOfflineLegalMoves(remainingHand, null).some(isHighCombination);
+}
+
+export function describeOfflineReply(view: OfflineBotObservation, move: OfflineLegalMove) {
+  const remaining = remainingCardsAfterMove(view.hand, move);
+  const winner = view.turnState.currentWinningSeat;
+  return {
+    weakSinglesLeft: weakLooseSingles(remaining),
+    hasStrongReserve: hasStrongReserve(remaining),
+    winnerCards: winner ? view.handCounts[winner] : 0,
+    trickPoints: cardPointTotal(cardsForTrick(view.plays, view.turnState.trickNumber)),
+  };
 }
 
 function visiblePlayedRankCount(deal: Pick<OfflineDeal, 'plays'>, rank: OfflineWishRank) {
@@ -938,19 +955,22 @@ function scoreBotMove(deal: HeuristicView, seat: OfflineSeat, move: OfflineLegal
   return score;
 }
 
+export function withOfflineBotWish(view: OfflineBotObservation, move: OfflineLegalMove): OfflineLegalMove {
+  return botMoveWithWish(view, view.seat, move);
+}
+
+function botMoveWithWish(deal: HeuristicView, seat: OfflineSeat, move: OfflineLegalMove): OfflineLegalMove {
+  return containsCard(move, 'mah-jong')
+    ? { ...move, wishRank: chooseBotMahJongWish(deal, seat, move.cards) }
+    : move;
+}
+
 function scoredBotMoves(deal: HeuristicView, seat: OfflineSeat, moves: OfflineLegalMove[], settings: FairBotSettings) {
   return moves
-    .map((move) =>
-      containsCard(move, 'mah-jong')
-        ? {
-            ...move,
-            wishRank: chooseBotMahJongWish(deal, seat, move.cards),
-          }
-        : move
-    )
+    .map((move) => botMoveWithWish(deal, seat, move))
     .map((move) => ({
       move,
-      score: scoreBotMove(deal, seat, move, settings),
+      score: scoreBotMove(deal, seat, move, settings) - (settings.replyPlayPenalty?.(move) ?? 0),
     }))
     .sort((a, b) => {
       if (b.score !== a.score) {
@@ -1101,6 +1121,15 @@ export function legalOfflineBotActions(view: OfflineBotObservation): OfflineSimu
   return moves;
 }
 
+export function isOptionalOfflineReply(view: OfflineBotObservation, actions: OfflineSimulationMove[]) {
+  const winner = view.turnState.currentWinningSeat;
+  return winner !== null && teamForSeat(winner) !== teamForSeat(view.seat) &&
+    !opponentNearOut(view, view.seat) &&
+    actions.some(move => move.action === 'pass') &&
+    actions.some(move => move.action === 'play') &&
+    !actions.some(move => move.action === 'play' && move.cards.length === view.hand.length);
+}
+
 function chooseHeuristicDecision(
   deal: HeuristicView,
   actions = legalOfflineBotActions(deal),
@@ -1111,12 +1140,15 @@ function chooseHeuristicDecision(
   const currentCombo = winningPlay?.combo ?? null;
   const appliesToWinner = winningPlay &&
     deal.handCounts[winningPlay.seat] <= (settings.phoenixLooseSinglesMaxWinnerCards ?? Infinity);
+  const optionalReply = (settings.opponentReplyThreshold !== undefined || settings.replyPlayPenalty !== undefined) &&
+    isOptionalOfflineReply(deal, actions);
   const scoredMoves = scoredBotMoves(
     deal,
     seat,
     actions.filter(move => move.action === 'play'),
     {
       ...settings,
+      replyPlayPenalty: optionalReply && actions.length <= 3 ? settings.replyPlayPenalty : undefined,
       phoenixLooseSinglesPenalty: appliesToWinner && actions.some(move => move.action === 'pass')
         ? settings.phoenixLooseSinglesPenalty
         : 0,
@@ -1144,7 +1176,7 @@ function chooseHeuristicDecision(
 
   const [bestMove] = scoredMoves;
 
-  if (currentCombo && bestMove.score < 1) {
+  if (currentCombo && bestMove.score < (optionalReply ? settings.opponentReplyThreshold ?? 1 : 1)) {
     if (settings.protectTrickWinners && !opponentNearOut(deal, seat) &&
         spendsControlAndStrandsSingles(bestMove.move, remainingCardsAfterMove(deal.hand, bestMove.move))) {
       return passDecision(deal, seat, 'Passing keeps a strong play available for the remaining weak singles.', scoredMoves);
@@ -1162,7 +1194,19 @@ function chooseOfflineBotDecision(deal: OfflineDeal, seat: OfflineSeat, settings
 }
 
 export function chooseLiveOfflineBot(deal: OfflineDeal, seat: OfflineSeat) {
-  return chooseOfflineBotDecision(deal, seat, liveOfflineBotSettings);
+  const winner = deal.turnState?.currentWinningSeat;
+  const hand = deal.hands[seat];
+  const challengeBonus = winner && deal.hands[winner].length <= 3 ? 95 : 0;
+  const result = chooseOfflineBotDecision(deal, seat, {
+    ...liveOfflineBotSettings,
+    replyPlayPenalty: move => {
+      const leavesOnePlayFinish = hand.length - move.cards.length >= 3 &&
+        validatePlay(remainingCardsAfterMove(hand, move), null).valid;
+      return -(challengeBonus + (leavesOnePlayFinish ? 95 : 0));
+    },
+  });
+  result.diagnostics.engineVersion = 'heuristic-v5';
+  return result;
 }
 
 export function chooseFairOfflineBot(view: OfflineBotObservation, actions?: OfflineSimulationMove[], settings?: FairBotSettings) {
