@@ -13,12 +13,18 @@ const {
   visibleCardList,
 } = require('../src/features/offline/offline-game');
 
+const straightExperimentOptions = {
+  finishWithDragonLead: false,
+  preserveLateControl: false,
+  delayDogLead: false,
+};
+
 function finishHand(deal, weight, candidateTeam) {
   for (let turn = 0; deal.status === 'playing' && turn < 224; turn += 1) {
     const seat = deal.turnState.currentSeat;
     const { decision } = chooseLiveOfflineBot(deal, seat, {
+      ...straightExperimentOptions,
       strandedStraightCardPenalty: teamForSeat(seat) === candidateTeam ? weight : 0,
-      finishWithDragonLead: false,
     });
     const next = applyOfflineMove(deal, seat, decision);
     assert.equal(next.plays.length, deal.plays.length + 1, 'Bot turn must make a legal play or pass.');
@@ -72,10 +78,10 @@ function replayReport(filename, weight) {
     turnState: { ...snapshot.turnState, currentSeat: lead.seat, currentWinningSeat: null, passCount: 0 },
   };
   const original = chooseLiveOfflineBot(position, lead.seat, {
-    strandedStraightCardPenalty: 0, finishWithDragonLead: false,
+    ...straightExperimentOptions, strandedStraightCardPenalty: 0,
   });
   const revised = chooseLiveOfflineBot(position, lead.seat, {
-    strandedStraightCardPenalty: weight, finishWithDragonLead: false,
+    ...straightExperimentOptions, strandedStraightCardPenalty: weight,
   });
   const actions = legalOfflineBotActions(observeOfflineBot(position, lead.seat));
   assert(actions.some(action => action.action === 'play' && action.combo.type === 'straight'));

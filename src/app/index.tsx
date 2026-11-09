@@ -1,17 +1,41 @@
 import { useState } from 'react';
 import { PositionReportList } from '@/features/offline/position-report-list';
-import Constants from 'expo-constants';
+import { checkForAppUpdate } from '@/features/offline/pwa-update';
 import { router } from 'expo-router';
-import { StyleSheet, Text, View } from 'react-native';
+import { Platform, StyleSheet, Text, View } from 'react-native';
 import { Button } from '@/components/button';
 import { Screen } from '@/components/screen';
 import { colors, spacing } from '@/constants/ui';
+import appConfig from '../../app.json';
 export default function OfflineHome() {
   const [reportsOpen, setReportsOpen] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState('');
+
+  async function checkUpdates() {
+    setChecking(true);
+    setUpdateMessage('Checking for an update…');
+    try {
+      const result = await checkForAppUpdate();
+      if (result === 'reloading') return;
+      setUpdateMessage(result === 'current'
+        ? 'You’re on the latest published version.'
+        : 'Update check unavailable. Reopen the app while online and try again.');
+    } catch {
+      setUpdateMessage('Could not check for updates. Check your connection and try again.');
+    } finally {
+      setChecking(false);
+    }
+  }
+
   return <Screen contentStyle={styles.content}>
     <Text style={styles.badge}>TICHU / OFFLINE FIRST</Text>
     <Text style={styles.title}>Offline Home</Text>
-    {Constants.expoConfig?.version ? <Text style={styles.body}>Version {Constants.expoConfig.version}</Text> : null}
+    <Text style={styles.body}>Version {appConfig.expo.version}</Text>
+    {Platform.OS === 'web'
+      ? <Button label="Check for updates" variant="secondary" loading={checking} onPress={() => void checkUpdates()} />
+      : null}
+    {updateMessage ? <Text accessibilityLiveRegion="polite" style={styles.body}>{updateMessage}</Text> : null}
     <Text style={styles.body}>Your table is ready. Play with three bots, inspect their decisions, and pick up where you left off.</Text>
     <View style={styles.card}>
       <Text style={styles.heading}>Play. Review. Repeat.</Text>

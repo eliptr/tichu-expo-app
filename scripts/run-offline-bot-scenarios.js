@@ -130,6 +130,53 @@ function cardIds(cards) {
 
 const scenarios = [
   {
+    name: 'leads low to keep a high pair against a one-card opponent',
+    run() {
+      const seat = 'team_two_player_two';
+      const hands = {
+        ...emptySeatCards(),
+        [seat]: [standardCard('sword', 'K'), standardCard('star', 'K'), standardCard('pagoda', '2'),
+          standardCard('pagoda', '5'), standardCard('star', '6')],
+        team_one_player_one: [standardCard('pagoda', 'A')],
+        team_two_player_one: [specialCard('dragon'), standardCard('star', '8'), standardCard('pagoda', '8')],
+        team_one_player_two: [standardCard('jade', 'K'), standardCard('pagoda', 'K'), standardCard('jade', 'J')],
+      };
+      const deal = makeDeal({ currentSeat: seat, hands, trickNumber: 7 });
+      const { decision } = chooseLiveOfflineBot(deal, seat);
+      expect(decision.action === 'play' && cardIds(decision.cards).join(',') === 'pagoda-2',
+        'Expected the low lead to retain both Kings.');
+      const low = applyOfflineMove(deal, seat, decision);
+      const ace = submitOfflinePlay(low, 'team_one_player_one', hands.team_one_player_one);
+      const afterAce = { ...ace, plays: [
+        playFor('team_one_player_one', [specialCard('phoenix')], 6), ...ace.plays,
+      ] };
+      expect(chooseLiveOfflineBot(afterAce, 'team_two_player_one').decision.action === 'pass',
+        'Expected Bot Left to save Dragon and let the trick close.');
+    },
+  },
+  {
+    name: 'can hold Dog for one more trick after regaining the lead',
+    run() {
+      const seat = 'team_two_player_two';
+      const previousLeader = 'team_one_player_two';
+      const hands = {
+        ...emptySeatCards(),
+        [seat]: [specialCard('dog'), standardCard('pagoda', '2'), standardCard('sword', '8'),
+          standardCard('sword', '9'), standardCard('sword', 'K'), standardCard('star', 'A')],
+        team_two_player_one: ['4', '6', '9', 'Q'].map(rank => standardCard('jade', rank)),
+        [previousLeader]: ['6', '7', '10', 'J'].map(rank => standardCard('pagoda', rank)),
+      };
+      const deal = makeDeal({
+        currentSeat: seat, hands, trickNumber: 7, finishOrder: ['team_one_player_one'],
+        plays: [playFor(previousLeader, [standardCard('jade', '3')], 6),
+          playFor(seat, [standardCard('star', 'J')], 6)],
+      });
+      const { decision } = chooseLiveOfflineBot(deal, seat);
+      expect(decision.action === 'play' && cardIds(decision.cards).join(',') === 'sword-8',
+        'Expected the bot to hold Dog for the next lead.');
+    },
+  },
+  {
     name: 'leads Dragon to finish heads-up and respects bombs and wishes',
     run() {
       const seat = 'team_two_player_one';

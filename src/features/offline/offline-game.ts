@@ -41,7 +41,7 @@ export type OfflineBotCandidateScore = {
 };
 
 export type OfflineBotVersion =
-  | 'heuristic-v2' | 'heuristic-v3' | 'heuristic-v4' | 'heuristic-v5' | 'heuristic-v6' | 'heuristic-v7'
+  | 'heuristic-v2' | 'heuristic-v3' | 'heuristic-v4' | 'heuristic-v5' | 'heuristic-v6' | 'heuristic-v7' | 'heuristic-v8'
   | 'fair-v1' | 'fair-v2' | 'fair-v3'
   | 'ismcts-v1' | 'ismcts-v2' | 'ismcts-v3';
 
@@ -119,6 +119,8 @@ export type FairBotSettings = {
   protectTrickWinners?: boolean;
   strandedStraightCardPenalty?: number;
   finishWithDragonLead?: boolean;
+  preserveLateControl?: boolean;
+  delayDogLead?: boolean;
   opponentReplyThreshold?: number;
   replyPlayPenalty?: (move: OfflineLegalMove) => number;
 };
@@ -1183,6 +1185,47 @@ function chooseHeuristicDecision(
     return playDecision(deal, seat, bestWishMove.move, `Mah Jong wish is active, so the bot must play ${deal.turnState.wishRank}.`, scoredMoves);
   }
 
+  const teammate = teammateSeat(seat);
+  if (settings.preserveLateControl && winningPlay?.combo?.type === 'single' && winningPlay.combo.rank === 14 &&
+      deal.finishOrder.length === 1 && deal.finishOrder[0] === winningPlay.seat &&
+      teamForSeat(winningPlay.seat) !== teamForSeat(seat) && offlineLeftSeat(winningPlay.seat) === seat &&
+      deal.hand.length > 2 && deal.plays.some(play => play.cards.some(card => card.id === 'phoenix')) &&
+      moves.length === 1 && containsCard(moves[0], 'dragon') && actions.some(move => move.action === 'pass')) {
+    return passDecision(deal, seat, 'Passing saves Dragon and can let the bot inherit the lead.', scoredMoves);
+  }
+
+  if ((settings.preserveLateControl || settings.delayDogLead) && !winningPlay &&
+      !moves.some(move => move.cards.length === deal.hand.length || leadLetsTeammateFinish(deal, seat, move))) {
+    const next = offlineLeftSeat(seat);
+    if (settings.preserveLateControl && deal.finishOrder.length === 0 && deal.handCounts[next] === 1 &&
+        deal.handCounts[teammate] >= 3 && deal.handCounts[teammate] <= 7 && deal.hand.length <= 7 &&
+        weakLooseSingles(deal.hand) >= 2 && moves.some(move => move.combo.type === 'pair' && move.combo.rank >= 13)) {
+      const lowLead = scoredMoves.filter(({ move }) => move.combo.type === 'single' && move.combo.rank <= 5 &&
+        isWeakLooseSingle(deal.hand, move.cards[0])).sort((a, b) => a.move.combo.rank - b.move.combo.rank)[0];
+      if (lowLead) {
+        return playDecision(deal, seat, lowLead.move, 'Leading low keeps the high pair to take control later.',
+          [lowLead, ...scoredMoves.filter(candidate => candidate !== lowLead)]);
+      }
+    }
+
+    if (settings.delayDogLead && deal.finishOrder.length === 1 &&
+        teamForSeat(deal.finishOrder[0]) !== teamForSeat(seat) && deal.handCounts[teammate] > 3 &&
+        moves.some(move => move.combo.type === 'dog') &&
+        deal.hand.filter(card => cardRankValue(card) >= 13).length >= 2 &&
+        deal.hand.some(card => cardRankValue(card) <= 3 && isWeakLooseSingle(deal.hand, card))) {
+      const previousLead = deal.plays.find(play => play.trickNumber === deal.turnState.trickNumber - 1);
+      if (previousLead && previousLead.seat !== seat) {
+        const middleLead = scoredMoves.filter(({ move }) => move.combo.type === 'single' &&
+          move.combo.rank >= 7 && move.combo.rank <= 10 && move.cards[0].rank &&
+          rankCount(deal.hand, move.cards[0].rank) === 1).sort((a, b) => a.move.combo.rank - b.move.combo.rank)[0];
+        if (middleLead) {
+          return playDecision(deal, seat, middleLead.move, 'Keeping the lead for another trick can clear cards before using Dog.',
+            [middleLead, ...scoredMoves.filter(candidate => candidate !== middleLead)]);
+        }
+      }
+    }
+  }
+
   if (settings.finishWithDragonLead && !winningPlay && deal.hand.length === 2) {
     const dragon = scoredMoves.find(({ move }) => containsCard(move, 'dragon'));
     const otherSeats = seats.filter(other => other !== seat && deal.handCounts[other] > 0);
@@ -1226,8 +1269,8 @@ function chooseOfflineBotDecision(deal: OfflineDeal, seat: OfflineSeat, settings
 export function chooseLiveOfflineBot(
   deal: OfflineDeal,
   seat: OfflineSeat,
-  { strandedStraightCardPenalty = 8, finishWithDragonLead = true }:
-    Pick<FairBotSettings, 'strandedStraightCardPenalty' | 'finishWithDragonLead'> = {},
+  { strandedStraightCardPenalty = 8, finishWithDragonLead = true, preserveLateControl = true, delayDogLead = true }:
+    Pick<FairBotSettings, 'strandedStraightCardPenalty' | 'finishWithDragonLead' | 'preserveLateControl' | 'delayDogLead'> = {},
 ) {
   const winner = deal.turnState?.currentWinningSeat;
   const hand = deal.hands[seat];
@@ -1236,14 +1279,16 @@ export function chooseLiveOfflineBot(
     ...liveOfflineBotSettings,
     strandedStraightCardPenalty,
     finishWithDragonLead,
+    preserveLateControl,
+    delayDogLead,
     replyPlayPenalty: move => {
       const leavesOnePlayFinish = hand.length - move.cards.length >= 3 &&
         validatePlay(remainingCardsAfterMove(hand, move), null).valid;
       return -(challengeBonus + (leavesOnePlayFinish ? 95 : 0));
     },
   });
-  result.diagnostics.engineVersion = finishWithDragonLead
-    ? 'heuristic-v7' : strandedStraightCardPenalty > 0 ? 'heuristic-v6' : 'heuristic-v5';
+  result.diagnostics.engineVersion = preserveLateControl || delayDogLead ? 'heuristic-v8' :
+    finishWithDragonLead ? 'heuristic-v7' : strandedStraightCardPenalty > 0 ? 'heuristic-v6' : 'heuristic-v5';
   return result;
 }
 

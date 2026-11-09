@@ -18,9 +18,14 @@ fs.writeFileSync(path.join(root, 'sw.js'), `
 const CACHE = ${JSON.stringify(cache)};
 const URLS = ${JSON.stringify(urls)};
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(URLS)));
+  event.waitUntil(caches.open(CACHE).then(cache =>
+    cache.addAll(URLS.map(url => new Request(url, { cache: 'reload' })))
+  ));
 });
-// Updates activate after existing tabs close, avoiding mixed app versions.
+// Updates normally wait for open tabs. The update button can activate a finished download.
+self.addEventListener('message', event => {
+  if (event.data?.type === 'ACTIVATE_UPDATE') event.waitUntil(self.skipWaiting());
+});
 self.addEventListener('activate', event => {
   event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith('tichu-offline-') && key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim()));
 });
