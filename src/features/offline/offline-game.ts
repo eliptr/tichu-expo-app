@@ -41,7 +41,7 @@ export type OfflineBotCandidateScore = {
 };
 
 export type OfflineBotVersion =
-  | 'heuristic-v2' | 'heuristic-v3' | 'heuristic-v4' | 'heuristic-v5' | 'heuristic-v6'
+  | 'heuristic-v2' | 'heuristic-v3' | 'heuristic-v4' | 'heuristic-v5' | 'heuristic-v6' | 'heuristic-v7'
   | 'fair-v1' | 'fair-v2' | 'fair-v3'
   | 'ismcts-v1' | 'ismcts-v2' | 'ismcts-v3';
 
@@ -118,6 +118,7 @@ export type FairBotSettings = {
   phoenixLooseSinglesMaxWinnerCards?: number;
   protectTrickWinners?: boolean;
   strandedStraightCardPenalty?: number;
+  finishWithDragonLead?: boolean;
   opponentReplyThreshold?: number;
   replyPlayPenalty?: (move: OfflineLegalMove) => number;
 };
@@ -1182,6 +1183,19 @@ function chooseHeuristicDecision(
     return playDecision(deal, seat, bestWishMove.move, `Mah Jong wish is active, so the bot must play ${deal.turnState.wishRank}.`, scoredMoves);
   }
 
+  if (settings.finishWithDragonLead && !winningPlay && deal.hand.length === 2) {
+    const dragon = scoredMoves.find(({ move }) => containsCard(move, 'dragon'));
+    const otherSeats = seats.filter(other => other !== seat && deal.handCounts[other] > 0);
+    const [opponent] = otherSeats;
+    if (dragon && otherSeats.length === 1 && teamForSeat(opponent) !== teamForSeat(seat) &&
+        deal.handCounts[opponent] < 4) {
+      return playDecision(
+        deal, seat, dragon.move, 'Dragon keeps the lead so the bot can play its last card next.',
+        [dragon, ...scoredMoves.filter(candidate => candidate !== dragon)],
+      );
+    }
+  }
+
   if (winningPlay && teamForSeat(winningPlay.seat) === teamForSeat(seat)) {
       const finishingMoves = moves.filter((move) => move.cards.length === deal.hand.length);
 
@@ -1212,7 +1226,8 @@ function chooseOfflineBotDecision(deal: OfflineDeal, seat: OfflineSeat, settings
 export function chooseLiveOfflineBot(
   deal: OfflineDeal,
   seat: OfflineSeat,
-  { strandedStraightCardPenalty = 8 }: Pick<FairBotSettings, 'strandedStraightCardPenalty'> = {},
+  { strandedStraightCardPenalty = 8, finishWithDragonLead = true }:
+    Pick<FairBotSettings, 'strandedStraightCardPenalty' | 'finishWithDragonLead'> = {},
 ) {
   const winner = deal.turnState?.currentWinningSeat;
   const hand = deal.hands[seat];
@@ -1220,13 +1235,15 @@ export function chooseLiveOfflineBot(
   const result = chooseOfflineBotDecision(deal, seat, {
     ...liveOfflineBotSettings,
     strandedStraightCardPenalty,
+    finishWithDragonLead,
     replyPlayPenalty: move => {
       const leavesOnePlayFinish = hand.length - move.cards.length >= 3 &&
         validatePlay(remainingCardsAfterMove(hand, move), null).valid;
       return -(challengeBonus + (leavesOnePlayFinish ? 95 : 0));
     },
   });
-  result.diagnostics.engineVersion = strandedStraightCardPenalty > 0 ? 'heuristic-v6' : 'heuristic-v5';
+  result.diagnostics.engineVersion = finishWithDragonLead
+    ? 'heuristic-v7' : strandedStraightCardPenalty > 0 ? 'heuristic-v6' : 'heuristic-v5';
   return result;
 }
 

@@ -4,6 +4,7 @@ const {
   advanceOfflineBotTurn,
   applyOfflineMove,
   chooseFairOfflineBot,
+  chooseLiveOfflineBot,
   liveOfflineBotSettings,
   generateOfflineLegalMoves,
   observeOfflineBot,
@@ -128,6 +129,38 @@ function cardIds(cards) {
 }
 
 const scenarios = [
+  {
+    name: 'leads Dragon to finish heads-up and respects bombs and wishes',
+    run() {
+      const seat = 'team_two_player_one';
+      const opponent = 'team_one_player_two';
+      const hands = {
+        ...emptySeatCards(),
+        [seat]: [specialCard('dragon'), standardCard('pagoda', '3')],
+        [opponent]: [standardCard('pagoda', '7')],
+      };
+      const position = {
+        currentSeat: seat, hands,
+        finishOrder: ['team_one_player_one', 'team_two_player_two'],
+      };
+      const lead = advanceOfflineBotTurn(makeDeal(position), chooseLiveOfflineBot, true);
+      expect(cardIds(lead.botDiagnostics.decisionCards).join(',') === 'dragon', 'Expected Dragon to retain the lead.');
+      const passed = applyOfflineMove(lead, opponent, { action: 'pass' });
+      const finished = advanceOfflineBotTurn(passed, chooseLiveOfflineBot, true);
+      expect(finished.finishOrder[2] === seat, 'Expected the bot to go out before the last opponent.');
+
+      const wish = chooseLiveOfflineBot(makeDeal({ ...position, wishRank: '3' }), seat);
+      expect(cardIds(wish.diagnostics.decisionCards).join(',') === 'pagoda-3', 'Expected the active wish to take priority.');
+
+      const withBomb = makeDeal({ ...position, hands: {
+        ...hands, [opponent]: suits.map(suit => standardCard(suit, '7')),
+      } });
+      const guarded = chooseLiveOfflineBot(withBomb, seat);
+      const previous = chooseLiveOfflineBot(withBomb, seat, { finishWithDragonLead: false });
+      expect(cardIds(guarded.diagnostics.decisionCards).join(',') === cardIds(previous.diagnostics.decisionCards).join(','),
+        'Expected regular scoring when the opponent has enough cards to bomb Dragon.');
+    },
+  },
   {
     name: 'bot card displays descend by rank across suits and special cards',
     run() {

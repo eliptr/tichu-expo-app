@@ -18,6 +18,7 @@ function finishHand(deal, weight, candidateTeam) {
     const seat = deal.turnState.currentSeat;
     const { decision } = chooseLiveOfflineBot(deal, seat, {
       strandedStraightCardPenalty: teamForSeat(seat) === candidateTeam ? weight : 0,
+      finishWithDragonLead: false,
     });
     const next = applyOfflineMove(deal, seat, decision);
     assert.equal(next.plays.length, deal.plays.length + 1, 'Bot turn must make a legal play or pass.');
@@ -70,8 +71,12 @@ function replayReport(filename, weight) {
     ...snapshot, hands, humanHand: hands[snapshot.humanSeat], plays: snapshot.plays.slice(0, -1),
     turnState: { ...snapshot.turnState, currentSeat: lead.seat, currentWinningSeat: null, passCount: 0 },
   };
-  const original = chooseLiveOfflineBot(position, lead.seat, { strandedStraightCardPenalty: 0 });
-  const revised = chooseLiveOfflineBot(position, lead.seat, { strandedStraightCardPenalty: weight });
+  const original = chooseLiveOfflineBot(position, lead.seat, {
+    strandedStraightCardPenalty: 0, finishWithDragonLead: false,
+  });
+  const revised = chooseLiveOfflineBot(position, lead.seat, {
+    strandedStraightCardPenalty: weight, finishWithDragonLead: false,
+  });
   const actions = legalOfflineBotActions(observeOfflineBot(position, lead.seat));
   assert(actions.some(action => action.action === 'play' && action.combo.type === 'straight'));
   assert.deepEqual(original.decision.cards.map(card => card.id).sort(), lead.cards.map(card => card.id).sort());
