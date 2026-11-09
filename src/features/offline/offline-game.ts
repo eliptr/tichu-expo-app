@@ -41,7 +41,7 @@ export type OfflineBotCandidateScore = {
 };
 
 export type OfflineBotVersion =
-  | 'heuristic-v2' | 'heuristic-v3' | 'heuristic-v4' | 'heuristic-v5'
+  | 'heuristic-v2' | 'heuristic-v3' | 'heuristic-v4' | 'heuristic-v5' | 'heuristic-v6'
   | 'fair-v1' | 'fair-v2' | 'fair-v3'
   | 'ismcts-v1' | 'ismcts-v2' | 'ismcts-v3';
 
@@ -117,6 +117,7 @@ export type FairBotSettings = {
   phoenixLooseSinglesPenalty?: number;
   phoenixLooseSinglesMaxWinnerCards?: number;
   protectTrickWinners?: boolean;
+  strandedStraightCardPenalty?: number;
   opponentReplyThreshold?: number;
   replyPlayPenalty?: (move: OfflineLegalMove) => number;
 };
@@ -621,11 +622,13 @@ function rankIsInNaturalStraight(hand: TichuCard[], rank: number) {
   return high - low + 1 >= 5;
 }
 
+function isWeakLooseSingle(hand: TichuCard[], card: TichuCard) {
+  return card.kind === 'standard' && card.rank !== null && cardRankValue(card) <= 10 &&
+    rankCount(hand, card.rank) === 1 && !rankIsInNaturalStraight(hand, cardRankValue(card));
+}
+
 function weakLooseSingles(hand: TichuCard[]) {
-  return hand.filter(card =>
-    card.kind === 'standard' && card.rank && cardRankValue(card) <= 10 &&
-    rankCount(hand, card.rank) === 1 && !rankIsInNaturalStraight(hand, cardRankValue(card))
-  ).length;
+  return hand.filter(card => isWeakLooseSingle(hand, card)).length;
 }
 
 function isHighCombination(move: OfflineLegalMove) {
@@ -693,7 +696,12 @@ function breaksConsecutivePairs(hand: TichuCard[], move: OfflineLegalMove, remai
     (copies(remainingHand, rank - 1) >= 2 || copies(remainingHand, rank + 1) >= 2));
 }
 
-function quietLeadScore(hand: TichuCard[], move: OfflineLegalMove, remainingHand: TichuCard[]) {
+function quietLeadScore(
+  hand: TichuCard[],
+  move: OfflineLegalMove,
+  remainingHand: TichuCard[],
+  strandedStraightCardPenalty: number,
+) {
   if (remainingHand.length === 0 || containsCard(move, 'dog') || containsCard(move, 'mah-jong')) return 0;
 
   // Prefer weak leads while keeping combinations intact for when they are needed.
@@ -706,7 +714,15 @@ function quietLeadScore(hand: TichuCard[], move: OfflineLegalMove, remainingHand
   if (move.combo.type === 'single' && move.cards[0].rank) {
     const copies = rankCount(hand, move.cards[0].rank);
     if (copies > 1) score -= 100;
-    else if (rankIsInNaturalStraight(hand, move.combo.rank)) score -= 65;
+    else if (rankIsInNaturalStraight(hand, move.combo.rank)) {
+      score -= 65;
+      if (strandedStraightCardPenalty > 0) {
+        const strandedCards = remainingHand.filter(card =>
+          isWeakLooseSingle(remainingHand, card) && rankIsInNaturalStraight(hand, cardRankValue(card)),
+        );
+        score -= strandedCards.length * strandedStraightCardPenalty;
+      }
+    }
   }
   if (breaksConsecutivePairs(hand, move, remainingHand)) score -= 110;
   return score + twoTurnExitPlanScore(move, remainingHand);
@@ -863,7 +879,7 @@ function scoreBotMove(deal: HeuristicView, seat: OfflineSeat, move: OfflineLegal
     }
 
     if (quietLead) {
-      score += quietLeadScore(hand, move, remainingHand);
+      score += quietLeadScore(hand, move, remainingHand, settings.strandedStraightCardPenalty ?? 0);
     }
 
     if (opponentIsNearOut) {
@@ -1193,19 +1209,24 @@ function chooseOfflineBotDecision(deal: OfflineDeal, seat: OfflineSeat, settings
   return result;
 }
 
-export function chooseLiveOfflineBot(deal: OfflineDeal, seat: OfflineSeat) {
+export function chooseLiveOfflineBot(
+  deal: OfflineDeal,
+  seat: OfflineSeat,
+  { strandedStraightCardPenalty = 8 }: Pick<FairBotSettings, 'strandedStraightCardPenalty'> = {},
+) {
   const winner = deal.turnState?.currentWinningSeat;
   const hand = deal.hands[seat];
   const challengeBonus = winner && deal.hands[winner].length <= 3 ? 95 : 0;
   const result = chooseOfflineBotDecision(deal, seat, {
     ...liveOfflineBotSettings,
+    strandedStraightCardPenalty,
     replyPlayPenalty: move => {
       const leavesOnePlayFinish = hand.length - move.cards.length >= 3 &&
         validatePlay(remainingCardsAfterMove(hand, move), null).valid;
       return -(challengeBonus + (leavesOnePlayFinish ? 95 : 0));
     },
   });
-  result.diagnostics.engineVersion = 'heuristic-v5';
+  result.diagnostics.engineVersion = strandedStraightCardPenalty > 0 ? 'heuristic-v6' : 'heuristic-v5';
   return result;
 }
 

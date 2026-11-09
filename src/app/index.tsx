@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { PositionReportList } from '@/features/offline/position-report-list';
+import Constants from 'expo-constants';
 import { router } from 'expo-router';
 import { StyleSheet, Text, View } from 'react-native';
 import { Button } from '@/components/button';
@@ -10,6 +11,7 @@ export default function OfflineHome() {
   return <Screen contentStyle={styles.content}>
     <Text style={styles.badge}>TICHU / OFFLINE FIRST</Text>
     <Text style={styles.title}>Offline Home</Text>
+    {Constants.expoConfig?.version ? <Text style={styles.body}>Version {Constants.expoConfig.version}</Text> : null}
     <Text style={styles.body}>Your table is ready. Play with three bots, inspect their decisions, and pick up where you left off.</Text>
     <View style={styles.card}>
       <Text style={styles.heading}>Play. Review. Repeat.</Text>
