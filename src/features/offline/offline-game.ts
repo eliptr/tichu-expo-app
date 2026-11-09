@@ -43,7 +43,13 @@ export type OfflineBotCandidateScore = {
 export type OfflineBotVersion =
   | 'heuristic-v2' | 'heuristic-v3' | 'heuristic-v4' | 'heuristic-v5' | 'heuristic-v6' | 'heuristic-v7' | 'heuristic-v8'
   | 'fair-v1' | 'fair-v2' | 'fair-v3'
-  | 'ismcts-v1' | 'ismcts-v2' | 'ismcts-v3';
+  | 'heuristic-v8-phoenix'
+  | 'ismcts-v1' | 'ismcts-v2' | 'ismcts-v3' | 'ismcts-v4';
+
+export type OfflineBotExperiments = {
+  extraPhoenixProtection: boolean;
+  endgameSearch: boolean;
+};
 
 export type OfflineBotDiagnostics = {
   candidates: OfflineBotCandidateScore[];
@@ -54,7 +60,12 @@ export type OfflineBotDiagnostics = {
   seat: OfflineSeat;
   trickNumber: number;
   engineVersion?: OfflineBotVersion;
-  search?: { iterations: number; elapsedMs: number; fallback?: 'outside-endgame' | 'forced-move' | 'no-sample' | 'no-result' };
+  experiments?: OfflineBotExperiments;
+  search?: {
+    iterations: number;
+    elapsedMs: number;
+    fallback?: 'outside-endgame' | 'forced-move' | 'immediate-finish' | 'no-sample' | 'no-result' | 'incomplete-shortlist';
+  };
 };
 
 type OfflineSearchSummary = Pick<OfflineBotDiagnostics, 'seat' | 'trickNumber'> & { iterations: number };
@@ -1152,7 +1163,8 @@ export function isOptionalOfflineReply(view: OfflineBotObservation, actions: Off
 function chooseHeuristicDecision(
   deal: HeuristicView,
   actions = legalOfflineBotActions(deal),
-  settings: FairBotSettings = {}
+  settings: FairBotSettings = {},
+  onRankedPlays?: (moves: OfflineLegalMove[]) => void,
 ): { decision: OfflineBotDecision; diagnostics: OfflineBotDiagnostics } {
   const { seat } = deal;
   const winningPlay = currentWinningPlay(deal);
@@ -1174,6 +1186,7 @@ function chooseHeuristicDecision(
     }
   );
   const moves = scoredMoves.map(({ move }) => move);
+  onRankedPlays?.(moves);
 
   if (moves.length === 0) {
     return passDecision(deal, seat, 'No legal move can beat the current table.');
@@ -1266,30 +1279,61 @@ function chooseOfflineBotDecision(deal: OfflineDeal, seat: OfflineSeat, settings
   return result;
 }
 
-export function chooseLiveOfflineBot(
-  deal: OfflineDeal,
-  seat: OfflineSeat,
-  { strandedStraightCardPenalty = 8, finishWithDragonLead = true, preserveLateControl = true, delayDogLead = true }:
-    Pick<FairBotSettings, 'strandedStraightCardPenalty' | 'finishWithDragonLead' | 'preserveLateControl' | 'delayDogLead'> = {},
+type LiveBotOptions = Pick<FairBotSettings,
+  'strandedStraightCardPenalty' | 'finishWithDragonLead' | 'preserveLateControl' | 'delayDogLead' | 'phoenixLooseSinglesPenalty'>;
+
+export function liveOfflineSettingsForView(
+  { turnState, hand, handCounts }: OfflineBotObservation,
+  { strandedStraightCardPenalty = 8, finishWithDragonLead = true, preserveLateControl = true,
+    delayDogLead = true, phoenixLooseSinglesPenalty = 0 }: LiveBotOptions = {},
 ) {
-  const winner = deal.turnState?.currentWinningSeat;
-  const hand = deal.hands[seat];
-  const challengeBonus = winner && deal.hands[winner].length <= 3 ? 95 : 0;
-  const result = chooseOfflineBotDecision(deal, seat, {
+  const winner = turnState?.currentWinningSeat;
+  const challengeBonus = winner && handCounts[winner] <= 3 ? 95 : 0;
+  return {
     ...liveOfflineBotSettings,
     strandedStraightCardPenalty,
     finishWithDragonLead,
     preserveLateControl,
     delayDogLead,
+    phoenixLooseSinglesPenalty,
     replyPlayPenalty: move => {
       const leavesOnePlayFinish = hand.length - move.cards.length >= 3 &&
         validatePlay(remainingCardsAfterMove(hand, move), null).valid;
       return -(challengeBonus + (leavesOnePlayFinish ? 95 : 0));
     },
-  });
-  result.diagnostics.engineVersion = preserveLateControl || delayDogLead ? 'heuristic-v8' :
+  } satisfies FairBotSettings;
+}
+
+export function chooseLiveOfflineBot(deal: OfflineDeal, seat: OfflineSeat, options?: LiveBotOptions) {
+  const view = observeOfflineBot(deal, seat);
+  const settings = liveOfflineSettingsForView(view, options);
+  const result = chooseHeuristicDecision({ ...view, legacyHands: deal.hands }, undefined, settings);
+  const { preserveLateControl, delayDogLead, finishWithDragonLead, strandedStraightCardPenalty, phoenixLooseSinglesPenalty } = settings;
+  result.diagnostics.engineVersion = phoenixLooseSinglesPenalty > 0 ? 'heuristic-v8-phoenix' :
+    preserveLateControl || delayDogLead ? 'heuristic-v8' :
     finishWithDragonLead ? 'heuristic-v7' : strandedStraightCardPenalty > 0 ? 'heuristic-v6' : 'heuristic-v5';
   return result;
+}
+
+export function shortlistOfflineBotActions(view: OfflineBotObservation, settings: FairBotSettings) {
+  const legal = legalOfflineBotActions(view);
+  let ranked: OfflineLegalMove[] = [];
+  const preferred = chooseHeuristicDecision(view, legal, settings, moves => { ranked = moves; });
+  const finishingPlay = ranked.find(move => move.cards.length === view.hand.length);
+  if (finishingPlay) {
+    return {
+      actions: [finishingPlay],
+      preferred: playDecision(view, view.seat, finishingPlay, 'This play empties the hand.', [{ move: finishingPlay, score: 0 }]),
+      immediateFinish: true,
+    };
+  }
+  const plays = preferred.decision.action === 'play'
+    ? [preferred.decision, ...ranked.filter(move => move !== preferred.decision)]
+    : ranked;
+  const pass = legal.find(move => move.action === 'pass');
+  const actions: OfflineSimulationMove[] = plays.slice(0, 3);
+  if (pass) actions.push(pass);
+  return { actions, preferred, immediateFinish: false };
 }
 
 export function chooseFairOfflineBot(view: OfflineBotObservation, actions?: OfflineSimulationMove[], settings?: FairBotSettings) {

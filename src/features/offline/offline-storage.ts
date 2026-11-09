@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { OfflineDeal } from './offline-game';
+import type { OfflineBotExperiments, OfflineDeal } from './offline-game';
 
 export type OfflineSave = {
   version: 1;
@@ -10,7 +10,15 @@ export type OfflineSave = {
   scoredHandNumber: number;
   botDelay: number;
   showDiagnostics: boolean;
+  botExperiments?: OfflineBotExperiments;
 };
+
+export function normalizeOfflineBotExperiments(settings?: OfflineBotExperiments): OfflineBotExperiments {
+  return {
+    extraPhoenixProtection: settings?.extraPhoenixProtection === true,
+    endgameSearch: settings?.endgameSearch === true,
+  };
+}
 const key = 'tichu.offline.v1';
 let writes = Promise.resolve();
 export async function loadOfflineSave(): Promise<OfflineSave | null> {

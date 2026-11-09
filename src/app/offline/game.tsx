@@ -2,26 +2,23 @@ import { capturePosition, storePositionReport, type PositionReport } from '@/fea
 import { FormTextInput } from '@/components/form-text-input';
 import { router } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Animated, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { Alert, Animated, Pressable, StyleSheet, Switch, Text, useWindowDimensions, View } from 'react-native';
 
-import { loadOfflineSave, saveOfflineGame } from '@/features/offline/offline-storage';
+import { loadOfflineSave, normalizeOfflineBotExperiments, saveOfflineGame } from '@/features/offline/offline-storage';
 import { Button } from '@/components/button';
 import { Screen } from '@/components/screen';
 import { colors, spacing } from '@/constants/ui';
 import { sortCardsForHandDisplay } from '@/features/game/card-display';
 import { validatePlay } from '@/features/game/combination';
 import type { TichuCard } from '@/features/game/game-types';
-import { chooseSearchOfflineBot } from '@/features/offline/offline-search';
+import { chooseResponsiveOfflineBot } from '@/features/offline/offline-search';
 import {
   advanceOfflineBotTurn,
   applyOfflinePassing,
-  chooseLiveOfflineBot,
   createOfflineDeal,
   currentOfflineTrickPlays,
   currentOfflineWinningPlay,
   generateOfflineLegalMoves,
-  liveOfflineBotSettings,
-  observeOfflineBot,
   offlineWishRanks,
   submitOfflinePass,
   submitOfflinePlay,
@@ -32,13 +29,6 @@ import {
   type PassDirection,
   type OfflineWishRank,
 } from '@/features/offline/offline-game';
-
-const experimentalBot = __DEV__ && process.env.EXPO_PUBLIC_TICHU_EXPERIMENTAL_BOT === '1'
-  ? (deal: OfflineDeal, seat: OfflineSeat) => chooseSearchOfflineBot(observeOfflineBot(deal, seat), {
-      budgetMs: 100,
-      heuristicSettings: liveOfflineBotSettings,
-    })
-  : undefined;
 
 type MatchTargetScore = 500 | 1000 | 2000;
 type MatchScores = {
@@ -61,9 +51,11 @@ const handGridLeftPadding = 10;
 const handGridColumns = 7;
 const searchFallbackText = {
   'outside-endgame': 'This turn was too early for search.',
-  'forced-move': 'Search skipped because there was only one legal move.',
+  'forced-move': 'Search skipped because there was only one candidate.',
+  'immediate-finish': 'Search skipped because the bot could go out now.',
   'no-sample': 'Search could not sample a possible deal in time.',
   'no-result': 'Search did not complete a simulation on this turn.',
+  'incomplete-shortlist': 'Search could not finish a simulation for every candidate. The bot used its normal rules.',
 };
 
 export default function OfflineBotGameScreen() {
@@ -89,7 +81,7 @@ export default function OfflineBotGameScreen() {
   const lastBotPosition = useRef<OfflineDeal | null>(null);
   function reportPosition() {
     setReportNote(''); setReportMessage('');
-    setReportDraft(capturePosition({ version: 1, deal, targetScore, matchScores, handNumber, scoredHandNumber, botDelay, showDiagnostics }, lastBotPosition.current));
+    setReportDraft(capturePosition({ version: 1, deal, targetScore, matchScores, handNumber, scoredHandNumber, botDelay, showDiagnostics, botExperiments }, lastBotPosition.current));
   }
   async function saveReport() {
     if (!reportDraft || savingReport) return;
@@ -104,6 +96,7 @@ export default function OfflineBotGameScreen() {
   const [storageError, setStorageError] = useState('');
   const [botDelay, setBotDelay] = useState(650);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [botExperiments, setBotExperiments] = useState(() => normalizeOfflineBotExperiments());
   useEffect(() => {
     let active = true;
     loadOfflineSave().then(save => {
@@ -111,15 +104,16 @@ export default function OfflineBotGameScreen() {
       setDeal(save.deal); setTargetScore(save.targetScore); setMatchScores(save.matchScores);
       setHandNumber(save.handNumber); setScoredHandNumber(save.scoredHandNumber);
       setBotDelay(save.botDelay); setShowDiagnostics(save.showDiagnostics);
+      setBotExperiments(normalizeOfflineBotExperiments(save.botExperiments));
     }).catch(() => { if (active) setStorageError('Could not restore your save. You can start a new game.'); })
       .finally(() => { if (active) setHydrated(true); });
     return () => { active = false; };
   }, []);
   useEffect(() => {
     if (!hydrated) return;
-    saveOfflineGame({ version: 1, deal, targetScore, matchScores, handNumber, scoredHandNumber, botDelay, showDiagnostics })
+    saveOfflineGame({ version: 1, deal, targetScore, matchScores, handNumber, scoredHandNumber, botDelay, showDiagnostics, botExperiments })
       .catch(() => setStorageError('Local saving is unavailable. Keep this screen open to continue your game.'));
-  }, [hydrated, deal, targetScore, matchScores, handNumber, scoredHandNumber, botDelay, showDiagnostics]);
+  }, [hydrated, deal, targetScore, matchScores, handNumber, scoredHandNumber, botDelay, showDiagnostics, botExperiments]);
 
   const displayHand = useMemo(() => sortCardsForHandDisplay(deal.humanHand), [deal.humanHand]);
   const latestSearch = deal.botDiagnostics?.search;
@@ -187,13 +181,20 @@ export default function OfflineBotGameScreen() {
       return undefined;
     }
 
-    const timeoutId = setTimeout(() => {
+    const { currentSeat } = deal.turnState;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(async () => {
+      const result = await chooseResponsiveOfflineBot(deal, currentSeat, botExperiments, controller.signal);
+      if (!result || controller.signal.aborted) return;
       lastBotPosition.current = deal;
-      setDeal(advanceOfflineBotTurn(deal, experimentalBot ?? chooseLiveOfflineBot));
+      setDeal(advanceOfflineBotTurn(deal, () => result));
     }, botDelay);
 
-    return () => clearTimeout(timeoutId);
-  }, [reportDraft, hydrated, targetScore, botDelay, deal]);
+    return () => {
+      clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, [reportDraft, hydrated, targetScore, botDelay, deal, botExperiments]);
 
   useEffect(() => {
     if (!targetScore || deal.status !== 'finished' || !deal.scoreSummary || scoredHandNumber === handNumber) {
@@ -399,15 +400,29 @@ export default function OfflineBotGameScreen() {
       </View>
       <View style={{ gap: spacing.sm, marginBottom: spacing.md }}>
         <Button variant="secondary" label={`Bot pace: ${botDelay === 250 ? 'Fast' : botDelay === 650 ? 'Normal' : 'Slow'}`} onPress={() => setBotDelay(botDelay === 250 ? 650 : botDelay === 650 ? 1500 : 250)} />
+        <View style={styles.botSwitchRow}>
+          <Text style={styles.botDiagnosticsTitle}>Extra Phoenix protection</Text>
+          <Switch accessibilityLabel="Extra Phoenix protection" disabled={!hydrated}
+            value={botExperiments.extraPhoenixProtection}
+            onValueChange={extraPhoenixProtection => setBotExperiments(settings => ({ ...settings, extraPhoenixProtection }))} />
+        </View>
+        <View style={styles.botSwitchRow}>
+          <Text style={styles.botDiagnosticsTitle}>Endgame search</Text>
+          <Switch accessibilityLabel="Endgame search" disabled={!hydrated}
+            value={botExperiments.endgameSearch}
+            onValueChange={endgameSearch => setBotExperiments(settings => ({ ...settings, endgameSearch }))} />
+        </View>
         <Button variant="secondary" label={showDiagnostics ? 'Hide bot diagnostics' : 'Show bot diagnostics'} onPress={() => setShowDiagnostics(!showDiagnostics)} />
-        {showDiagnostics && (experimentalBot || deal.botDiagnostics) ? <View style={styles.botDiagnosticsPanel}>
+        {showDiagnostics && (botExperiments.endgameSearch || deal.botDiagnostics) ? <View style={styles.botDiagnosticsPanel}>
           {lastSearch && !latestSearch?.iterations ? (
             <Text style={styles.botDiagnosticsReason}>
               Last search · {lastSearchBot?.name ?? 'Bot'} ran {lastSearch.iterations} simulations on trick {lastSearch.trickNumber}.
             </Text>
           ) : null}
-          {latestSearch?.fallback ? <Text style={styles.botDiagnosticsReason}>{searchFallbackText[latestSearch.fallback]}</Text> : null}
-          {!deal.botDiagnostics && experimentalBot ? <Text style={styles.botDiagnosticsReason}>Search is enabled for late turns.</Text> : null}
+          {latestSearch?.fallback ? <Text style={styles.botDiagnosticsReason}>
+            {searchFallbackText[latestSearch.fallback]} {latestSearch.iterations ? `(${latestSearch.iterations} simulations)` : ''}
+          </Text> : null}
+          {!deal.botDiagnostics && botExperiments.endgameSearch ? <Text style={styles.botDiagnosticsReason}>Search is enabled for late turns.</Text> : null}
           {deal.botDiagnostics ? <>
             <Text style={styles.botDiagnosticsTitle}>{deal.botDiagnostics.decisionLabel}</Text>
             <Text style={styles.botDiagnosticsReason}>{deal.botDiagnostics.reason}</Text>
@@ -994,6 +1009,14 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '900',
     textTransform: 'uppercase',
+  },
+  botSwitchRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: spacing.md,
+    minHeight: 44,
+    gap: spacing.sm,
   },
   botDiagnosticsPanel: {
     backgroundColor: '#F9FAFB',

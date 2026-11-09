@@ -22,16 +22,9 @@ Storage holds up to 50 reports and refuses new reports when full rather than sil
 
 Run `npm run test:offline-bots` to replay the reported pair-of-fives decision. The scenario checks what playing a 5, playing a 6, or passing leaves in hand, and verifies that the bot's choice preserves both the pair and the 5-10 straight. For routine single-card replies, the bot prefers to keep pairs, triples, and straights that do not need the Phoenix. Mandatory wishes and pressure against a nearly-out opponent bypass the preference. Reports record the latest decision's engine version. Saved `heuristic-v1` and `heuristic-v2` reports still work.
 
-## Experimental offline bot
+## Offline bot experiments
 
-Set `EXPO_PUBLIC_TICHU_EXPERIMENTAL_BOT=1` before starting Expo in development mode. In PowerShell:
-
-```powershell
-$env:EXPO_PUBLIC_TICHU_EXPERIMENTAL_BOT = '1'
-npm.cmd run web
-```
-
-Use `npm.cmd start` for Expo Go. Restart Metro after changing the flag. All three bot seats use the same engine. It uses the fair heuristic throughout the hand and runs ISMCTS when 16 or fewer cards remain and every seat has at most eight. The fair heuristic handles single-choice turns and any search that runs out of time before returning a move. The app checks its 100 ms search budget during sampling and simulated turns. Bot diagnostics show why search was skipped and keep the most recent completed search visible through the rest of the hand.
+Both switches beside Bot pace start off and save locally. **Extra Phoenix protection** lowers a Phoenix reply's heuristic score by 120 when it leaves at least three loose low singles and passing is legal. **Endgame search** compares up to three ranked plays and legal pass when at most 32 cards remain and every seat has at most ten. Search uses each seat's own cards and public information. The bot goes out immediately when it can and uses the normal heuristic if search can't finish a simulation for every candidate within its 100 ms budget. Bot diagnostics and position reports capture the result.
 
 ## Self-play
 
@@ -42,7 +35,7 @@ npm run self-play -- --pairs 1000 --seed 10001 --seats search,fair,search,fair
 node scripts/run-offline-bot-scenarios.js --compare-report
 ```
 
-`--seats` takes four bot names in play order, with partners opposite. Choose `legacy`, `fair`, or `search`. Each seed plays twice with the team lineups swapped. Win counts and the paired point margin are relative to the original lineups, and decision timings use wall-clock measurements. Add `--json` for individual hand records. The runner defaults to 128 iterations per search with no time limit, and `--iterations` lets you compare smaller budgets. The report replay compares King and pass on the same 128 sampled hands using fair heuristic play after each choice.
+`--seats` takes four bot names in play order, with partners opposite. Use `live` for the production baseline and `phoenix`, `endgame`, or `both` for the switches. For example, `npm run self-play -- --pairs 48 --seed 60001 --seats both,live,both,live` swaps the teams for every seed and reports scores, one-twos, failures, and search timings. The runner uses up to 128 iterations and 100 ms for the new endgame modes; the historical `search` mode has no time limit. Use `--iterations` for a smaller iteration limit and `--json` for individual hands. The historical `legacy` and `fair` modes remain available. The report replay compares King and pass on the same 128 sampled hands using fair heuristic play after each choice.
 
 Run `npm.cmd run experiment:phoenix` to compare three Phoenix penalties against `fair-v2`. The command replays the reported position, screens the penalties on 400 paired deals, and confirms any positive screening winner on 1,000 fresh pairs. It saves the scores and any qualifying candidate in `experiment-results/phoenix.json`.
 

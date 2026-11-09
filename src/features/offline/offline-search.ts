@@ -2,16 +2,20 @@ import {
   applyOfflineMove,
   canFulfillOfflineWish,
   chooseFairOfflineBot,
+  chooseLiveOfflineBot,
   createOfflineDeck,
   legalOfflineBotActions,
+  liveOfflineSettingsForView,
   observeOfflineBot,
   offlineSeats,
   offlineWishRanks,
   shuffleOfflineCards,
+  shortlistOfflineBotActions,
   teamForSeat,
   visibleCardList,
   type FairBotSettings,
   type OfflineBotDiagnostics,
+  type OfflineBotExperiments,
   type OfflineBotObservation,
   type OfflineDeal,
   type OfflineHands,
@@ -132,10 +136,13 @@ function teamMargin(deal: OfflineDeal, seat: OfflineBotObservation['seat']) {
   return teamForSeat(seat) === 'team_one' ? teamOneScore - teamTwoScore : teamTwoScore - teamOneScore;
 }
 
-export function rollOutOfflineHand(deal: OfflineDeal, deadline = Infinity, settings?: FairBotSettings): OfflineDeal | null {
+type RolloutSettings = FairBotSettings | ((view: OfflineBotObservation) => FairBotSettings);
+
+export function rollOutOfflineHand(deal: OfflineDeal, deadline = Infinity, settings?: RolloutSettings): OfflineDeal | null {
   for (let turn = 0; deal.turnState && turn < maxHandTurns && performance.now() < deadline; turn += 1) {
     const seat = deal.turnState.currentSeat;
-    const { decision } = chooseFairOfflineBot(observeOfflineBot(deal, seat), undefined, settings);
+    const view = observeOfflineBot(deal, seat);
+    const { decision } = chooseFairOfflineBot(view, undefined, typeof settings === 'function' ? settings(view) : settings);
     const next = applyOfflineMove(deal, seat, decision);
     if (next === deal) return null;
     deal = next;
@@ -197,7 +204,12 @@ type SearchOptions = {
   heuristicSettings?: FairBotSettings;
 };
 
-export function chooseSearchOfflineBot(view: OfflineBotObservation, options: SearchOptions = {}) {
+type RankedSearch = {
+  settingsForView: (view: OfflineBotObservation) => FairBotSettings;
+  fallback: () => ReturnType<typeof chooseLiveOfflineBot>;
+};
+
+function* searchOfflineBot(view: OfflineBotObservation, options: SearchOptions, rankedSearch?: RankedSearch) {
   const start = performance.now();
   const deadline = start + (options.budgetMs ?? Infinity);
   const random = options.random ?? Math.random;
@@ -205,15 +217,18 @@ export function chooseSearchOfflineBot(view: OfflineBotObservation, options: Sea
   const root = new Map<string, Edge>();
   let iterations = 0;
   let fallback: NonNullable<OfflineBotDiagnostics['search']>['fallback'];
+  let shortlist: ReturnType<typeof shortlistOfflineBotActions> | undefined;
 
-  if (counts.reduce((sum, count) => sum + count, 0) > 16 || counts.some(count => count > 8)) {
+  if (counts.reduce((sum, count) => sum + count, 0) > 32 || counts.some(count => count > 10)) {
     fallback = 'outside-endgame';
   } else {
-    const actions = searchActions(view);
-    if (actions.length === 1) fallback = 'forced-move';
-    const sample = createOfflineSampler(view);
+    shortlist = rankedSearch && shortlistOfflineBotActions(view, rankedSearch.settingsForView(view));
+    const actions = shortlist?.actions ?? searchActions(view);
+    if (shortlist?.immediateFinish) fallback = 'immediate-finish';
+    else if (actions.length === 1) fallback = 'forced-move';
+    const sample = actions.length > 1 ? createOfflineSampler(view) : null;
     const rootTeam = teamForSeat(view.seat);
-    for (let index = 0; actions.length > 1 && index < (options.iterations ?? 128) && performance.now() < deadline; index += 1) {
+    for (let index = 0; sample && index < (options.iterations ?? 128) && performance.now() < deadline; index += 1) {
       let deal = sample(random, deadline);
       if (!deal) {
         if (iterations === 0) fallback = 'no-sample';
@@ -235,7 +250,7 @@ export function chooseSearchOfflineBot(view: OfflineBotObservation, options: Sea
         if (!edge.visits) break;
       }
       if (!path.length) break;
-      const finished = rollOutOfflineHand(deal, deadline, options.heuristicSettings);
+      const finished = rollOutOfflineHand(deal, deadline, rankedSearch?.settingsForView ?? options.heuristicSettings);
       const points = finished && teamMargin(finished, view.seat);
       if (points === null) break;
       for (const edge of path) {
@@ -243,13 +258,19 @@ export function chooseSearchOfflineBot(view: OfflineBotObservation, options: Sea
         edge.points += points;
       }
       iterations += 1;
+      yield;
+    }
+    if (shortlist && iterations > 0 && actions.some(move => !root.get(actionKey(move))?.visits)) {
+      fallback = 'incomplete-shortlist';
     }
   }
 
   const explored = [...root.values()].filter(edge => edge.visits > 0)
     .sort((a, b) => b.visits - a.visits || b.points / b.visits - a.points / a.visits);
-  if (!explored.length) {
-    const result = chooseFairOfflineBot(view, undefined, options.heuristicSettings);
+  if (fallback || !explored.length) {
+    const result = shortlist?.immediateFinish ? shortlist.preferred
+      : rankedSearch ? rankedSearch.fallback() : chooseFairOfflineBot(view, undefined, options.heuristicSettings);
+    if (shortlist?.immediateFinish) result.diagnostics.engineVersion = 'ismcts-v4';
     result.diagnostics.search = { iterations, elapsedMs: performance.now() - start, fallback: fallback ?? 'no-result' };
     return result;
   }
@@ -259,7 +280,7 @@ export function chooseSearchOfflineBot(view: OfflineBotObservation, options: Sea
     : `${move.combo.label} - ${visibleCardList(move.cards)}${move.wishRank ? ` (wish ${move.wishRank})` : ''}`;
   const mostVisited = explored[0];
   const heuristicLead = view.turnState.currentWinningSeat === null
-    ? root.get(actionKey(chooseFairOfflineBot(view, undefined, options.heuristicSettings).decision))
+    ? root.get(actionKey(shortlist?.preferred.decision ?? chooseFairOfflineBot(view, undefined, options.heuristicSettings).decision))
     : undefined;
   // Close lead estimates favor the heuristic, which values weak cards and intact shapes.
   const selected = heuristicLead && heuristicLead.visits >= 4 &&
@@ -267,11 +288,11 @@ export function chooseSearchOfflineBot(view: OfflineBotObservation, options: Sea
     ? heuristicLead
     : mostVisited;
   const decision = selected.move;
-  const candidates = [selected, ...explored.filter(edge => edge !== selected)].slice(0, 3);
+  const candidates = [selected, ...explored.filter(edge => edge !== selected)].slice(0, shortlist ? 4 : 3);
   return {
     decision,
     diagnostics: {
-      engineVersion: options.heuristicSettings?.protectTrickWinners ? 'ismcts-v3' : 'ismcts-v2',
+      engineVersion: rankedSearch ? 'ismcts-v4' : options.heuristicSettings?.protectTrickWinners ? 'ismcts-v3' : 'ismcts-v2',
       search: { iterations, elapsedMs: performance.now() - start },
       candidates: candidates.map(({ move, points, visits }) => ({
         cards: move.action === 'play' ? move.cards : [],
@@ -287,4 +308,54 @@ export function chooseSearchOfflineBot(view: OfflineBotObservation, options: Sea
       trickNumber: view.turnState.trickNumber,
     } satisfies OfflineBotDiagnostics,
   };
+}
+
+export function chooseSearchOfflineBot(view: OfflineBotObservation, options: SearchOptions = {}) {
+  const search = searchOfflineBot(view, options);
+  let step = search.next();
+  while (!step.done) step = search.next();
+  return step.value;
+}
+
+function* configuredOfflineBot(
+  deal: OfflineDeal,
+  seat: OfflineBotObservation['seat'],
+  experiments: OfflineBotExperiments,
+  { budgetMs = 100, iterations = 128, random }: Omit<SearchOptions, 'heuristicSettings'> = {},
+) {
+  const options = { phoenixLooseSinglesPenalty: experiments.extraPhoenixProtection ? 120 : 0 };
+  const heuristic = () => chooseLiveOfflineBot(deal, seat, options);
+  const result = experiments.endgameSearch
+    ? yield* searchOfflineBot(observeOfflineBot(deal, seat), { budgetMs, iterations, random }, {
+        settingsForView: view => liveOfflineSettingsForView(view, options),
+        fallback: heuristic,
+      })
+    : heuristic();
+  if (experiments.extraPhoenixProtection || experiments.endgameSearch) result.diagnostics.experiments = { ...experiments };
+  return result;
+}
+
+export function chooseConfiguredOfflineBot(...args: Parameters<typeof configuredOfflineBot>) {
+  const search = configuredOfflineBot(...args);
+  let step = search.next();
+  while (!step.done) step = search.next();
+  return step.value;
+}
+
+export async function chooseResponsiveOfflineBot(
+  deal: OfflineDeal, seat: OfflineBotObservation['seat'], experiments: OfflineBotExperiments, signal: AbortSignal,
+) {
+  const search = configuredOfflineBot(deal, seat, experiments);
+  let sliceStart = performance.now();
+  let step = search.next();
+  while (!step.done) {
+    if (performance.now() - sliceStart >= 8) {
+      // Give taps and rendering a chance to run between simulations.
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      if (signal.aborted) return null;
+      sliceStart = performance.now();
+    }
+    step = search.next();
+  }
+  return step.value;
 }

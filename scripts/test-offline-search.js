@@ -6,14 +6,17 @@ const {
   applyOfflineMove,
   applyOfflinePassing,
   chooseFairOfflineBot,
+  chooseLiveOfflineBot,
   createOfflineDeal,
   createOfflineDeck,
   generateOfflineLegalMoves,
   legalOfflineBotActions,
+  liveOfflineSettingsForView,
   observeOfflineBot,
   offlineSeats,
+  shortlistOfflineBotActions,
 } = require('../src/features/offline/offline-game');
-const { chooseSearchOfflineBot, createOfflineSampler } = require('../src/features/offline/offline-search');
+const { chooseConfiguredOfflineBot, chooseSearchOfflineBot, createOfflineSampler } = require('../src/features/offline/offline-search');
 const { validatePlay } = require('../src/features/game/combination');
 const { seededRandom } = require('./run-offline-self-play');
 
@@ -131,8 +134,62 @@ function verifyInformationBoundary() {
   const timedOut = chooseSearchOfflineBot(view, { random: seededRandom(7), budgetMs: 0 });
   assert.equal(timedOut.diagnostics.search.iterations, 0);
   assert.deepEqual(timedOut.decision, chooseFairOfflineBot(view).decision);
+
+  const experiments = { extraPhoenixProtection: true, endgameSearch: true };
+  const runConfigured = (state, iterations, budgetMs = Infinity) =>
+    chooseConfiguredOfflineBot(state, seat, experiments, { iterations, budgetMs, random: seededRandom(7) });
+  const configured = runConfigured(deal, 16);
+  const changedConfigured = runConfigured({ ...deal, hands }, 16);
+  assert.equal(configured.diagnostics.engineVersion, 'ismcts-v4');
+  assert.deepEqual(configured.decision, changedConfigured.decision);
+  assert.deepEqual(configured.diagnostics.candidates, changedConfigured.diagnostics.candidates);
+  const incomplete = runConfigured(deal, 1);
+  assert.equal(incomplete.diagnostics.search.fallback, 'incomplete-shortlist');
+  assert.equal(incomplete.diagnostics.search.iterations, 1);
+  assert.deepEqual(incomplete.decision, chooseLiveOfflineBot(deal, seat, { phoenixLooseSinglesPenalty: 120 }).decision);
+  assert.deepEqual(chooseConfiguredOfflineBot(deal, seat, { extraPhoenixProtection: false, endgameSearch: false }),
+    chooseLiveOfflineBot(deal, seat));
   console.log('PASS hidden-hand invariance, exchange constraints, deck conservation, legal search and fallback');
+}
+
+function verifyShortlist() {
+  const [seat, winner] = offlineSeats;
+  const deck = createOfflineDeck();
+  const cards = (...ids) => ids.map(id => deck.find(card => card.id === id));
+  const deal = applyOfflinePassing(createOfflineDeal(seededRandom(1)));
+  const view = {
+    ...observeOfflineBot(deal, deal.turnState.currentSeat), seat, knownOutgoing: [],
+    hand: cards('jade-6', 'jade-7', 'jade-8', 'jade-9', 'sword-9', 'jade-J'),
+    handCounts: Object.fromEntries(offlineSeats.map(other => [other, 6])),
+    plays: [{ seat: winner, trickNumber: 4, cards: cards('sword-5'), combo: validatePlay(cards('sword-5'), null), action: 'play' }],
+    turnState: { currentSeat: seat, currentWinningSeat: winner, passCount: 0, trickNumber: 4, wishRank: null },
+  };
+  const rank = observation => shortlistOfflineBotActions(observation, liveOfflineSettingsForView(observation));
+  const reply = rank(view);
+  assert(legalOfflineBotActions(view).length > 4);
+  assert.equal(reply.actions.length, 4);
+  assert.equal(new Set(reply.actions.map(key)).size, 4);
+  assert.equal(reply.actions.at(-1).action, 'pass');
+  if (reply.preferred.decision.action === 'play') assert.deepEqual(reply.actions[0], reply.preferred.decision);
+
+  const wish = rank({ ...view, turnState: { ...view.turnState, wishRank: '9' } });
+  assert.equal(wish.actions.length, 2);
+  assert(wish.actions.every(move => move.action === 'play' && move.cards.some(card => card.rank === '9')));
+
+  const lead = rank({ ...view, hand: cards('mah-jong', 'jade-2', 'jade-3', 'jade-4', 'jade-5', 'jade-Q'),
+    turnState: { ...view.turnState, currentWinningSeat: null } });
+  assert.equal(lead.actions.length, 3);
+  assert.equal(new Set(lead.actions.map(key)).size, 3);
+  assert(lead.actions.some(move => move.cards.some(card => card.id === 'mah-jong') && move.wishRank));
+
+  const end = { ...deal, plays: view.plays, turnState: view.turnState,
+    hands: Object.fromEntries(offlineSeats.map((other, index) => [other, index ? cards('jade-3', 'jade-4') : cards('jade-6')])) };
+  const finishing = chooseConfiguredOfflineBot(end, seat, { extraPhoenixProtection: false, endgameSearch: true });
+  assert.equal(finishing.diagnostics.search.fallback, 'immediate-finish');
+  assert.deepEqual(finishing.decision.cards, end.hands[seat]);
+  console.log('PASS three distinct plays plus legal pass, single Mah Jong wish per play, mandatory wishes and immediate finish');
 }
 
 verifyMoveGenerator();
 verifyInformationBoundary();
+verifyShortlist();

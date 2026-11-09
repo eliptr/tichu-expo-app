@@ -5,11 +5,13 @@ const {
   advanceOfflineBotTurn,
   applyOfflinePassing,
   chooseFairOfflineBot,
+  chooseLiveOfflineBot,
   createOfflineDeal,
   observeOfflineBot,
   offlineSeats,
+  teamForSeat,
 } = require('../src/features/offline/offline-game');
-const { chooseSearchOfflineBot } = require('../src/features/offline/offline-search');
+const { chooseConfiguredOfflineBot, chooseSearchOfflineBot } = require('../src/features/offline/offline-search');
 
 function seededRandom(seed) {
   let state = seed >>> 0;
@@ -24,6 +26,8 @@ function seededRandom(seed) {
 function playHand(seed, lineup, swapped, iterations) {
   let deal = applyOfflinePassing(createOfflineDeal(seededRandom(seed)));
   const decisionTimes = {};
+  const searchTimes = [];
+  const searchResults = {};
   const random = seededRandom(seed ^ 0x9e3779b9);
   let failure = null;
   let turns = 0;
@@ -33,7 +37,9 @@ function playHand(seed, lineup, swapped, iterations) {
     const bot = lineup[offlineSeats.indexOf(seat)];
     const start = performance.now();
     try {
-      const next = advanceOfflineBotTurn(deal, bot.choose && ((state, actingSeat) =>
+      const next = advanceOfflineBotTurn(deal, bot.chooseDeal ? ((state, actingSeat) =>
+        bot.chooseDeal(state, actingSeat, { random, iterations })
+      ) : bot.choose && ((state, actingSeat) =>
         bot.choose(observeOfflineBot(state, actingSeat), { random, iterations })
       ), true);
       if (next.plays.length !== deal.plays.length + 1 || next.plays.at(-1).seat !== seat) {
@@ -41,6 +47,14 @@ function playHand(seed, lineup, swapped, iterations) {
         break;
       }
       deal = next;
+      const search = deal.botDiagnostics?.search;
+      if (search) {
+        const outcome = search.fallback ?? 'completed';
+        searchResults[outcome] = (searchResults[outcome] ?? 0) + 1;
+        if (!['outside-endgame', 'forced-move', 'immediate-finish'].includes(outcome)) {
+          searchTimes.push(search.elapsedMs);
+        }
+      }
     } catch (error) {
       failure = { kind: 'illegal', seat, turns, message: error.message };
       break;
@@ -52,7 +66,9 @@ function playHand(seed, lineup, swapped, iterations) {
 
   if (!deal.scoreSummary && !failure) failure = { kind: 'stuck', turns };
   const scores = deal.scoreSummary && [deal.scoreSummary.teamOneScore, deal.scoreSummary.teamTwoScore];
-  return { seed, swapped, bots: lineup.map(bot => bot.version), scores, turns, failure, decisionTimes };
+  const oneTwoTeam = deal.scoreSummary?.oneTwoTeam ?? null;
+  return { seed, swapped, bots: lineup.map(bot => bot.version), scores, oneTwoTeam, turns, failure,
+    decisionTimes, searchTimes, searchResults };
 }
 
 function main() {
@@ -79,6 +95,14 @@ function main() {
     if (name === 'legacy') return { version: 'heuristic-v3' };
     if (name === 'fair') return { version: 'fair-v2', choose: view => chooseFairOfflineBot(view) };
     if (name === 'search') return { version: 'ismcts-v2', choose: chooseSearchOfflineBot };
+    if (name === 'live') return { version: 'heuristic-v8', chooseDeal: chooseLiveOfflineBot };
+    if (['phoenix', 'endgame', 'both'].includes(name)) return {
+      version: name,
+      chooseDeal: (deal, seat, options) => chooseConfiguredOfflineBot(deal, seat, {
+        extraPhoenixProtection: name !== 'endgame',
+        endgameSearch: name !== 'phoenix',
+      }, options),
+    };
     throw new Error(`Unknown bot: ${name}`);
   });
   if (lineup.length !== offlineSeats.length) throw new Error('Use four comma-separated bots in seat order.');
@@ -105,13 +129,27 @@ function runPairedSelfPlay({ pairs, startSeed, iterations = 128, lineup }) {
   const pairMargins = [];
   const failureCounts = { illegal: 0, stuck: 0 };
   const timings = {};
+  const teamScores = [0, 0];
+  const oneTwo = [0, 0];
+  const searchTimes = [];
+  const searchResults = {};
   for (const hand of hands) {
     if (hand.failure) failureCounts[hand.failure.kind] += 1;
     for (const [version, times] of Object.entries(hand.decisionTimes)) {
       (timings[version] ??= []).push(...times);
     }
+    searchTimes.push(...hand.searchTimes);
+    for (const [outcome, count] of Object.entries(hand.searchResults)) {
+      searchResults[outcome] = (searchResults[outcome] ?? 0) + count;
+    }
     if (!hand.scores) continue;
     const [first, second] = hand.swapped ? [...hand.scores].reverse() : hand.scores;
+    teamScores[0] += first;
+    teamScores[1] += second;
+    if (hand.oneTwoTeam) {
+      const firstTeam = teamForSeat(offlineSeats[hand.swapped ? 1 : 0]);
+      oneTwo[hand.oneTwoTeam === firstTeam ? 0 : 1] += 1;
+    }
     if (first === second) ties += 1;
     else wins[first > second ? 0 : 1] += 1;
   }
@@ -125,14 +163,17 @@ function runPairedSelfPlay({ pairs, startSeed, iterations = 128, lineup }) {
   const margin95 = n > 1
     ? 1.96 * Math.sqrt(pairMargins.reduce((sum, margin) => sum + (margin - mean) ** 2, 0) / ((n - 1) * n))
     : null;
-  const decisionTimeMs = Object.fromEntries(Object.entries(timings).map(([bot, times]) => {
+  const timingStats = times => {
+    if (!times.length) return null;
     times.sort((a, b) => a - b);
-    return [bot, { count: times.length, p50: times[Math.ceil(times.length * 0.5) - 1], p95: times[Math.ceil(times.length * 0.95) - 1], max: times.at(-1) }];
-  }));
+    return { count: times.length, p50: times[Math.ceil(times.length * 0.5) - 1],
+      p95: times[Math.ceil(times.length * 0.95) - 1], max: times.at(-1) };
+  };
+  const decisionTimeMs = Object.fromEntries(Object.entries(timings).map(([bot, times]) => [bot, timingStats(times)]));
   const summary = {
     startSeed, pairs, iterations, lineup: lineup.map(bot => bot.version), wins, ties, failures: failureCounts,
     teamOnePointGainPerHand: mean, confidence95: margin95 === null ? null : [mean - margin95, mean + margin95],
-    decisionTimeMs,
+    teamScores, oneTwo, decisionTimeMs, searchResults, searchTimeMs: timingStats(searchTimes),
   };
   return { summary, hands };
 }
