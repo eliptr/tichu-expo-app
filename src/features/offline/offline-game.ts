@@ -48,6 +48,7 @@ export type OfflineBotVersion =
 
 export type OfflineBotExperiments = {
   extraPhoenixProtection: boolean;
+  exitProtection?: boolean;
   endgameSearch: boolean;
 };
 
@@ -128,6 +129,8 @@ export type FairBotSettings = {
   phoenixLooseSinglesPenalty?: number;
   phoenixLooseSinglesMaxWinnerCards?: number;
   protectTrickWinners?: boolean;
+  preserveControlAfterPartnerFinishes?: boolean;
+  strandedSinglesPenalty?: { minimumSingles: number; points: number };
   strandedStraightCardPenalty?: number;
   finishWithDragonLead?: boolean;
   preserveLateControl?: boolean;
@@ -137,6 +140,7 @@ export type FairBotSettings = {
 };
 
 export const liveOfflineBotSettings: FairBotSettings = { protectTrickWinners: true };
+export const exitProtectionPenalty = { minimumSingles: 2, points: 40 };
 
 const suits: NonNullable<TichuCard['suit']>[] = ['jade', 'sword', 'pagoda', 'star'];
 const ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
@@ -898,7 +902,11 @@ function scoreBotMove(deal: HeuristicView, seat: OfflineSeat, move: OfflineLegal
 
     if (opponentIsNearOut) {
       if (move.combo.type === 'single') {
-        score += move.combo.rank * 2.2;
+        const strandsOnlyWeakSingles = settings.preserveControlAfterPartnerFinishes &&
+          deal.finishOrder[0] === teammateSeat(seat) &&
+          spendsControlAndStrandsSingles(move, remainingHand) &&
+          weakLooseSingles(remainingHand) === remainingCards;
+        if (!strandsOnlyWeakSingles) score += move.combo.rank * 2.2;
       } else {
         score += 55 + move.combo.count * 12;
       }
@@ -948,6 +956,14 @@ function scoreBotMove(deal: HeuristicView, seat: OfflineSeat, move: OfflineLegal
   if (settings.protectTrickWinners && !opponentIsNearOut && !leadFinishesTeammate &&
       spendsControlAndStrandsSingles(move, remainingHand)) {
     score -= 160;
+  } else if (settings.strandedSinglesPenalty && !leadFinishesTeammate &&
+      (isHighCombination(move) || move.cards.some(isStrongCard))) {
+    const firstOut = deal.finishOrder[0];
+    const defendingOneTwo = firstOut && teamForSeat(firstOut) !== teamForSeat(seat) && opponentIsNearOut;
+    const { minimumSingles, points } = settings.strandedSinglesPenalty;
+    if (!defendingOneTwo && weakLooseSingles(remainingHand) >= minimumSingles && !hasStrongReserve(remainingHand)) {
+      score -= points;
+    }
   }
 
   if (containsCard(move, 'phoenix')) {
@@ -1280,12 +1296,14 @@ function chooseOfflineBotDecision(deal: OfflineDeal, seat: OfflineSeat, settings
 }
 
 type LiveBotOptions = Pick<FairBotSettings,
-  'strandedStraightCardPenalty' | 'finishWithDragonLead' | 'preserveLateControl' | 'delayDogLead' | 'phoenixLooseSinglesPenalty'>;
+  'strandedStraightCardPenalty' | 'finishWithDragonLead' | 'preserveLateControl' | 'delayDogLead' |
+  'phoenixLooseSinglesPenalty' | 'preserveControlAfterPartnerFinishes' | 'strandedSinglesPenalty'>;
 
 export function liveOfflineSettingsForView(
   { turnState, hand, handCounts }: OfflineBotObservation,
   { strandedStraightCardPenalty = 8, finishWithDragonLead = true, preserveLateControl = true,
-    delayDogLead = true, phoenixLooseSinglesPenalty = 0 }: LiveBotOptions = {},
+    delayDogLead = true, phoenixLooseSinglesPenalty = 0, preserveControlAfterPartnerFinishes = false,
+    strandedSinglesPenalty }: LiveBotOptions = {},
 ) {
   const winner = turnState?.currentWinningSeat;
   const challengeBonus = winner && handCounts[winner] <= 3 ? 95 : 0;
@@ -1296,6 +1314,8 @@ export function liveOfflineSettingsForView(
     preserveLateControl,
     delayDogLead,
     phoenixLooseSinglesPenalty,
+    preserveControlAfterPartnerFinishes,
+    strandedSinglesPenalty,
     replyPlayPenalty: move => {
       const leavesOnePlayFinish = hand.length - move.cards.length >= 3 &&
         validatePlay(remainingCardsAfterMove(hand, move), null).valid;

@@ -16,6 +16,7 @@ export type OfflineSave = {
 export function normalizeOfflineBotExperiments(settings?: OfflineBotExperiments): OfflineBotExperiments {
   return {
     extraPhoenixProtection: settings?.extraPhoenixProtection === true,
+    exitProtection: settings?.exitProtection === true,
     endgameSearch: settings?.endgameSearch === true,
   };
 }

@@ -4,6 +4,7 @@ import {
   chooseFairOfflineBot,
   chooseLiveOfflineBot,
   createOfflineDeck,
+  exitProtectionPenalty,
   legalOfflineBotActions,
   liveOfflineSettingsForView,
   observeOfflineBot,
@@ -323,7 +324,10 @@ function* configuredOfflineBot(
   experiments: OfflineBotExperiments,
   { budgetMs = 100, iterations = 128, random }: Omit<SearchOptions, 'heuristicSettings'> = {},
 ) {
-  const options = { phoenixLooseSinglesPenalty: experiments.extraPhoenixProtection ? 120 : 0 };
+  const options = {
+    phoenixLooseSinglesPenalty: experiments.extraPhoenixProtection ? 120 : 0,
+    strandedSinglesPenalty: experiments.exitProtection ? exitProtectionPenalty : undefined,
+  };
   const heuristic = () => chooseLiveOfflineBot(deal, seat, options);
   const result = experiments.endgameSearch
     ? yield* searchOfflineBot(observeOfflineBot(deal, seat), { budgetMs, iterations, random }, {
@@ -331,7 +335,9 @@ function* configuredOfflineBot(
         fallback: heuristic,
       })
     : heuristic();
-  if (experiments.extraPhoenixProtection || experiments.endgameSearch) result.diagnostics.experiments = { ...experiments };
+  if (experiments.extraPhoenixProtection || experiments.exitProtection || experiments.endgameSearch) {
+    result.diagnostics.experiments = { ...experiments };
+  }
   return result;
 }
 

@@ -407,6 +407,12 @@ export default function OfflineBotGameScreen() {
             onValueChange={extraPhoenixProtection => setBotExperiments(settings => ({ ...settings, extraPhoenixProtection }))} />
         </View>
         <View style={styles.botSwitchRow}>
+          <Text style={styles.botDiagnosticsTitle}>Exit protection</Text>
+          <Switch accessibilityLabel="Exit protection" disabled={!hydrated}
+            value={botExperiments.exitProtection === true}
+            onValueChange={exitProtection => setBotExperiments(settings => ({ ...settings, exitProtection }))} />
+        </View>
+        <View style={styles.botSwitchRow}>
           <Text style={styles.botDiagnosticsTitle}>Endgame search</Text>
           <Switch accessibilityLabel="Endgame search" disabled={!hydrated}
             value={botExperiments.endgameSearch}

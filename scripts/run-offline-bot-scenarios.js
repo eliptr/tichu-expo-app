@@ -130,6 +130,66 @@ function cardIds(cards) {
 
 const scenarios = [
   {
+    name: 'optional safer lead preserves control after partner goes out first',
+    run() {
+      const seat = 'team_two_player_two';
+      const partner = 'team_two_player_one';
+      const opponent = 'team_one_player_one';
+      const opponentPartner = 'team_one_player_two';
+      const ace = standardCard('star', 'A');
+      const eight = standardCard('jade', '8');
+      const hands = {
+        ...emptySeatCards(),
+        [seat]: [ace, eight, standardCard('sword', '5'), standardCard('sword', '2')],
+        [opponent]: [standardCard('sword', 'A'), standardCard('jade', 'J'), standardCard('pagoda', '10')],
+        [opponentPartner]: [standardCard('sword', 'Q')],
+      };
+      const deal = makeDeal({ currentSeat: seat, hands, finishOrder: [partner], trickNumber: 12 });
+      const settings = { preserveControlAfterPartnerFinishes: true };
+      const chosenIds = (state, options) => cardIds(chooseLiveOfflineBot(state, seat, options).diagnostics.decisionCards).join(',');
+      expect(chosenIds(deal) === ace.id, 'The baseline should lead the Ace.');
+      expect(chosenIds(deal, settings) === eight.id, 'The experiment should lead the eight and retain the Ace.');
+
+      const mandatoryWish = { ...deal, turnState: { ...deal.turnState, wishRank: 'A' } };
+      expect(chosenIds(mandatoryWish, settings) === ace.id, 'The Ace wish must still be fulfilled.');
+      const immediateFinish = makeDeal({ currentSeat: seat, hands: { ...hands, [seat]: [ace] }, finishOrder: [partner] });
+      expect(chosenIds(immediateFinish, settings) === ace.id, 'The bot should still go out immediately.');
+
+      const defendOneTwo = makeDeal({
+        currentSeat: seat, finishOrder: [opponent],
+        hands: { ...hands, [opponent]: [], [partner]: hands[opponent] },
+      });
+      expect(chosenIds(defendOneTwo, settings) === ace.id, 'Keep the high lead against an imminent opponent one-two.');
+
+      const keepAReserve = makeDeal({
+        currentSeat: seat, finishOrder: [partner],
+        hands: { ...hands, [seat]: [ace, standardCard('jade', 'K'), ...hands[seat].slice(1)] },
+      });
+      const baselineWithReserve = chooseLiveOfflineBot(keepAReserve, seat);
+      const experimentWithReserve = chooseLiveOfflineBot(keepAReserve, seat, settings);
+      expect(JSON.stringify(experimentWithReserve.diagnostics.candidates) ===
+        JSON.stringify(baselineWithReserve.diagnostics.candidates),
+        'Keep the pressure bonus if a strong card remains.');
+
+      const broaderRule = { strandedSinglesPenalty: { minimumSingles: 2, points: 40 } };
+      expect(chosenIds(deal, broaderRule) === eight.id, 'The broader rule should also retain the Ace in the report.');
+      expect(chosenIds(defendOneTwo, broaderRule) === ace.id, 'The broader rule must preserve one-two defense.');
+      expect(chosenIds(mandatoryWish, broaderRule) === ace.id, 'The broader rule must still fulfill the Ace wish.');
+      expect(chosenIds(immediateFinish, broaderRule) === ace.id, 'The broader rule must still finish immediately.');
+
+      const beforeAnyoneFinishes = makeDeal({
+        currentSeat: seat,
+        hands: {
+          ...hands,
+          [seat]: [ace, eight, standardCard('sword', '2')],
+          [partner]: [standardCard('jade', '3'), standardCard('star', '6'), standardCard('jade', 'K')],
+        },
+      });
+      expect(chosenIds(beforeAnyoneFinishes, settings) === ace.id, 'The narrow rule should leave this earlier lead alone.');
+      expect(chosenIds(beforeAnyoneFinishes, broaderRule) === eight.id, 'The broader rule should keep the Ace before anyone has finished.');
+    },
+  },
+  {
     name: 'leads low to keep a high pair against a one-card opponent',
     run() {
       const seat = 'team_two_player_two';
