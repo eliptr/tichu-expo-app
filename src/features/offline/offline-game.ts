@@ -49,6 +49,7 @@ export type OfflineBotVersion =
 export type OfflineBotExperiments = {
   extraPhoenixProtection: boolean;
   exitProtection?: boolean;
+  protectLowCards?: boolean;
   endgameSearch: boolean;
 };
 
@@ -131,6 +132,8 @@ export type FairBotSettings = {
   protectTrickWinners?: boolean;
   preserveControlAfterPartnerFinishes?: boolean;
   strandedSinglesPenalty?: { minimumSingles: number; points: number };
+  splitReplyPenalty?: { points: number; protectSequences: boolean; maxTrickPoints?: number };
+  strandedLowCardPenalty?: { points: number; lateBonus: number; protectOneCardReplies?: boolean };
   strandedStraightCardPenalty?: number;
   finishWithDragonLead?: boolean;
   preserveLateControl?: boolean;
@@ -141,6 +144,7 @@ export type FairBotSettings = {
 
 export const liveOfflineBotSettings: FairBotSettings = { protectTrickWinners: true };
 export const exitProtectionPenalty = { minimumSingles: 2, points: 40 };
+export const lowCardProtectionPenalty = { points: 95, lateBonus: 35, protectOneCardReplies: true };
 
 const suits: NonNullable<TichuCard['suit']>[] = ['jade', 'sword', 'pagoda', 'star'];
 const ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
@@ -714,6 +718,27 @@ function breaksConsecutivePairs(hand: TichuCard[], move: OfflineLegalMove, remai
     (copies(remainingHand, rank - 1) >= 2 || copies(remainingHand, rank + 1) >= 2));
 }
 
+function splitsReplyCombination(
+  hand: TichuCard[], move: OfflineLegalMove, remainingHand: TichuCard[], protectSequences: boolean,
+) {
+  const splitsSet = move.cards.some(card => {
+    if (!card.rank) return false;
+    const before = rankCount(hand, card.rank);
+    const after = rankCount(remainingHand, card.rank);
+    return (before === 2 || before === 3) && after > 0 && after < before;
+  });
+  if (splitsSet || !protectSequences) return splitsSet;
+
+  const strandsStraightCard = remainingHand.some(card =>
+    isWeakLooseSingle(remainingHand, card) && rankIsInNaturalStraight(hand, cardRankValue(card)),
+  );
+  return strandsStraightCard || breaksConsecutivePairs(hand, move, remainingHand);
+}
+
+function newlyLooseLowCards(hand: TichuCard[], remaining: TichuCard[]) {
+  return remaining.filter(card => isWeakLooseSingle(remaining, card) && !isWeakLooseSingle(hand, card));
+}
+
 function quietLeadScore(
   hand: TichuCard[],
   move: OfflineLegalMove,
@@ -921,6 +946,23 @@ function scoreBotMove(deal: HeuristicView, seat: OfflineSeat, move: OfflineLegal
     score -= 1000;
   }
 
+  const strandedLowCardPenalty = settings.strandedLowCardPenalty;
+  if (strandedLowCardPenalty && remainingCards >= 2 && !leadFinishesTeammate &&
+      !(opponentIsWinning && winningPlay && deal.handCounts[winningPlay.seat] <= 3) &&
+      !(opponentIsWinning && opponentIsNearOut && strandedLowCardPenalty.protectOneCardReplies) &&
+      !(opponentIsNearOut && deal.finishOrder[0] && teamForSeat(deal.finishOrder[0]) !== teamForSeat(seat))) {
+    const stranded = newlyLooseLowCards(hand, remainingHand);
+    if (stranded.length && !cleanRemainingCombo(remainingHand)) {
+      const cardsInPlay = Object.values(deal.handCounts).reduce((sum, count) => sum + count, 0);
+      const { points, lateBonus } = strandedLowCardPenalty;
+      const cheapTrickWeight = currentTrickPoints <= 5 ? 1 : currentTrickPoints <= 15 ? 0.6 : 0.3;
+      const lowest = Math.min(...stranded.map(cardRankValue));
+      const lowCardWeight = lowest <= 5 ? 1 : lowest <= 8 ? 0.7 : 0.4;
+      const cost = points + (cardsInPlay <= 24 ? lateBonus : 0);
+      score -= cost * cheapTrickWeight * lowCardWeight * (stranded.length > 1 ? 1.25 : 1);
+    }
+  }
+
   if (opponentIsWinning) {
     score += 75 + currentTrickPoints * 1.2;
 
@@ -934,6 +976,14 @@ function scoreBotMove(deal: HeuristicView, seat: OfflineSeat, move: OfflineLegal
       } else if (copies === 1 && rankIsInNaturalStraight(hand, move.combo.rank)) {
         score -= 12;
       }
+    }
+
+    const splitPenalty = settings.splitReplyPenalty;
+    if (splitPenalty && currentTrickPoints <= (splitPenalty.maxTrickPoints ?? 10) &&
+        winningPlay && deal.handCounts[winningPlay.seat] > 3 &&
+        splitsReplyCombination(hand, move, remainingHand, splitPenalty.protectSequences) &&
+        !(remainingCards >= 3 && cleanRemainingCombo(remainingHand))) {
+      score -= splitPenalty.points;
     }
   }
 
@@ -1187,16 +1237,20 @@ function chooseHeuristicDecision(
   const currentCombo = winningPlay?.combo ?? null;
   const appliesToWinner = winningPlay &&
     deal.handCounts[winningPlay.seat] <= (settings.phoenixLooseSinglesMaxWinnerCards ?? Infinity);
-  const optionalReply = (settings.opponentReplyThreshold !== undefined || settings.replyPlayPenalty !== undefined) &&
+  const optionalReply = (settings.opponentReplyThreshold !== undefined || settings.replyPlayPenalty !== undefined ||
+      settings.splitReplyPenalty !== undefined) &&
     isOptionalOfflineReply(deal, actions);
+  const canPass = actions.some(move => move.action === 'pass');
   const scoredMoves = scoredBotMoves(
     deal,
     seat,
     actions.filter(move => move.action === 'play'),
     {
       ...settings,
+      splitReplyPenalty: optionalReply ? settings.splitReplyPenalty : undefined,
+      strandedLowCardPenalty: !winningPlay || canPass ? settings.strandedLowCardPenalty : undefined,
       replyPlayPenalty: optionalReply && actions.length <= 3 ? settings.replyPlayPenalty : undefined,
-      phoenixLooseSinglesPenalty: appliesToWinner && actions.some(move => move.action === 'pass')
+      phoenixLooseSinglesPenalty: appliesToWinner && canPass
         ? settings.phoenixLooseSinglesPenalty
         : 0,
     }
@@ -1297,13 +1351,14 @@ function chooseOfflineBotDecision(deal: OfflineDeal, seat: OfflineSeat, settings
 
 type LiveBotOptions = Pick<FairBotSettings,
   'strandedStraightCardPenalty' | 'finishWithDragonLead' | 'preserveLateControl' | 'delayDogLead' |
-  'phoenixLooseSinglesPenalty' | 'preserveControlAfterPartnerFinishes' | 'strandedSinglesPenalty'>;
+  'phoenixLooseSinglesPenalty' | 'preserveControlAfterPartnerFinishes' | 'strandedSinglesPenalty' |
+  'splitReplyPenalty' | 'strandedLowCardPenalty'>;
 
 export function liveOfflineSettingsForView(
   { turnState, hand, handCounts }: OfflineBotObservation,
   { strandedStraightCardPenalty = 8, finishWithDragonLead = true, preserveLateControl = true,
     delayDogLead = true, phoenixLooseSinglesPenalty = 0, preserveControlAfterPartnerFinishes = false,
-    strandedSinglesPenalty }: LiveBotOptions = {},
+    strandedSinglesPenalty, splitReplyPenalty, strandedLowCardPenalty }: LiveBotOptions = {},
 ) {
   const winner = turnState?.currentWinningSeat;
   const challengeBonus = winner && handCounts[winner] <= 3 ? 95 : 0;
@@ -1316,6 +1371,8 @@ export function liveOfflineSettingsForView(
     phoenixLooseSinglesPenalty,
     preserveControlAfterPartnerFinishes,
     strandedSinglesPenalty,
+    splitReplyPenalty,
+    strandedLowCardPenalty,
     replyPlayPenalty: move => {
       const leavesOnePlayFinish = hand.length - move.cards.length >= 3 &&
         validatePlay(remainingCardsAfterMove(hand, move), null).valid;

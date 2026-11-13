@@ -130,6 +130,82 @@ function cardIds(cards) {
 
 const scenarios = [
   {
+    name: 'optional reply protection can pass to keep a pair or straight intact',
+    run() {
+      const [, bot, opponent] = seats;
+      const five = standardCard('star', '5');
+      const hands = {
+        ...emptySeatCards(),
+        [bot]: [standardCard('jade', '6'), standardCard('sword', '6'), standardCard('jade', '3'), standardCard('jade', '2')],
+        [opponent]: ['7', '8', '9', '10'].map(rank => standardCard('star', rank)),
+      };
+      const setup = { currentSeat: bot, currentWinningSeat: opponent, plays: [playFor(opponent, [five])] };
+      const deal = makeDeal({ ...setup, hands });
+      const rule = { splitReplyPenalty: { points: 95, protectSequences: true } };
+      const choose = (state, options = rule) => chooseLiveOfflineBot(state, bot, options).decision;
+      expect(choose(deal, {}).action === 'play', 'The baseline should split the sixes.');
+      expect(choose(deal).action === 'pass', 'The experiment should pass to preserve the sixes.');
+      expect(choose({ ...deal, turnState: { ...deal.turnState, wishRank: '6' } }).action === 'play',
+        'The bot must fulfill a legal wish even if it splits a pair.');
+      const urgent = makeDeal({ ...setup, hands: { ...hands, [opponent]: hands[opponent].slice(0, 1) } });
+      expect(choose(urgent).action === 'play', 'The bot should keep the urgent reply against a one-card opponent.');
+      const finish = makeDeal({ ...setup, hands: { ...hands, [bot]: [hands[bot][0]] } });
+      expect(choose(finish).action === 'play', 'The bot should play a legal immediate finish.');
+
+      const straight = makeDeal({
+        ...setup,
+        plays: [playFor(opponent, [standardCard('star', '9')])],
+        hands: {
+          ...hands,
+          [opponent]: ['Q', 'K', 'A', 'J'].map(rank => standardCard('star', rank)),
+          [bot]: ['6', '7', '8', '9', '10', '3'].map(rank => standardCard('jade', rank)),
+        },
+      });
+      expect(choose(straight, {}).action === 'play', 'The baseline should take a card out of the straight.');
+      expect(choose(straight).action === 'pass', 'The sequence variant should preserve the straight.');
+
+      const strandedRule = { strandedLowCardPenalty: { points: 95, lateBonus: 35 } };
+      expect(choose(deal, strandedRule).action === 'pass', 'The cheap late trick should not strand a six.');
+      expect(choose({ ...deal, turnState: { ...deal.turnState, wishRank: '6' } }, strandedRule).action === 'play',
+        'The stranded-card penalty must preserve mandatory wishes.');
+      const expensive = makeDeal({
+        ...setup,
+        hands: {
+          ...hands,
+          [bot]: ['9', '10', 'J', 'Q', 'K'].map(rank => standardCard('jade', rank))
+            .concat(standardCard('sword', 'Q'), standardCard('sword', 'K')),
+        },
+        plays: [playFor(opponent, [standardCard('sword', '10'), standardCard('pagoda', '10')])],
+      });
+      expect(choose(expensive, strandedRule).action === 'play', 'A valuable trick can justify breaking a straight.');
+
+      const pairIsStillIntact = makeDeal({
+        ...setup,
+        hands: { ...hands, [bot]: [...hands[bot], standardCard('pagoda', '6')] },
+      });
+      const withIntactPair = options => chooseLiveOfflineBot(pairIsStillIntact, bot, options).diagnostics.candidates;
+      expect(JSON.stringify(withIntactPair({})) === JSON.stringify(withIntactPair(strandedRule)),
+        'Taking one card out of a triple should carry no stranded-card cost if the pair remains.');
+
+      const oneCardOpponent = makeDeal({
+        ...setup,
+        hands: { ...hands, [seats[0]]: [], [seats[3]]: [], [opponent]: hands[opponent].slice(0, 1) },
+      });
+      const guardedRule = { strandedLowCardPenalty: { ...strandedRule.strandedLowCardPenalty, protectOneCardReplies: true } };
+      expect(choose(oneCardOpponent, guardedRule).action === 'play', 'Keep the reply when the winner is on one card.');
+
+      const urgentElsewhere = makeDeal({
+        ...setup,
+        hands: { ...hands, [seats[0]]: [standardCard('star', 'Q')] },
+      });
+      const unguarded = chooseLiveOfflineBot(urgentElsewhere, bot, strandedRule).diagnostics.candidates;
+      const guarded = chooseLiveOfflineBot(urgentElsewhere, bot, guardedRule).diagnostics.candidates;
+      const baseline = chooseLiveOfflineBot(urgentElsewhere, bot).diagnostics.candidates;
+      expect(JSON.stringify(guarded) === JSON.stringify(baseline) && unguarded[0].score < guarded[0].score,
+        'Keep the existing reply scores when the other opponent is on one card.');
+    },
+  },
+  {
     name: 'optional safer lead preserves control after partner goes out first',
     run() {
       const seat = 'team_two_player_two';

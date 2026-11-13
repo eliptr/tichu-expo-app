@@ -17,6 +17,7 @@ export function normalizeOfflineBotExperiments(settings?: OfflineBotExperiments)
   return {
     extraPhoenixProtection: settings?.extraPhoenixProtection === true,
     exitProtection: settings?.exitProtection === true,
+    protectLowCards: settings?.protectLowCards === true,
     endgameSearch: settings?.endgameSearch === true,
   };
 }

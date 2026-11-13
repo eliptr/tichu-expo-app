@@ -7,6 +7,7 @@ import {
   exitProtectionPenalty,
   legalOfflineBotActions,
   liveOfflineSettingsForView,
+  lowCardProtectionPenalty,
   observeOfflineBot,
   offlineSeats,
   offlineWishRanks,
@@ -327,6 +328,7 @@ function* configuredOfflineBot(
   const options = {
     phoenixLooseSinglesPenalty: experiments.extraPhoenixProtection ? 120 : 0,
     strandedSinglesPenalty: experiments.exitProtection ? exitProtectionPenalty : undefined,
+    strandedLowCardPenalty: experiments.protectLowCards ? lowCardProtectionPenalty : undefined,
   };
   const heuristic = () => chooseLiveOfflineBot(deal, seat, options);
   const result = experiments.endgameSearch
@@ -335,7 +337,7 @@ function* configuredOfflineBot(
         fallback: heuristic,
       })
     : heuristic();
-  if (experiments.extraPhoenixProtection || experiments.exitProtection || experiments.endgameSearch) {
+  if (experiments.extraPhoenixProtection || experiments.exitProtection || experiments.protectLowCards || experiments.endgameSearch) {
     result.diagnostics.experiments = { ...experiments };
   }
   return result;
