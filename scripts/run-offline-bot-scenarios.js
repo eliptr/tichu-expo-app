@@ -130,6 +130,42 @@ function cardIds(cards) {
 
 const scenarios = [
   {
+    name: 'keeps pairs intact when leading for a partner with a single finish',
+    run() {
+      const seat = 'team_one_player_two';
+      const partner = 'team_one_player_one';
+      const hands = {
+        ...emptySeatCards(),
+        [seat]: [
+          standardCard('star', 'K'), standardCard('sword', 'K'),
+          standardCard('star', '10'), standardCard('jade', '10'),
+          standardCard('pagoda', '5'), standardCard('sword', '5'), standardCard('sword', '8'),
+        ],
+        [partner]: [specialCard('dragon')],
+        team_two_player_one: ['2', '3', '4', '6', 'J', 'Q'].map(rank => standardCard('pagoda', rank)),
+        team_two_player_two: ['2', '3', '4', '6', 'J', 'Q'].map(rank => standardCard('star', rank)),
+      };
+      const deal = makeDeal({ currentSeat: seat, hands, trickNumber: 5 });
+      const choose = (state, options) => chooseLiveOfflineBot(state, seat, options);
+      const baseline = choose(deal, { partnerFinishPlanning: false });
+      const planned = choose(deal);
+      expect(baseline.decision.cards[0]?.rank === '5', 'The old bonus should favor a five.');
+      expect(cardIds(planned.decision.cards).join(',') === 'sword-8',
+        'Lead the loose eight to feed Dragon and keep all three pairs.');
+      const urgent = makeDeal({ currentSeat: seat, hands: {
+        ...hands, team_two_player_one: [hands.team_two_player_one[0]],
+      } });
+      expect(cardIds(choose(urgent).decision.cards).join(',') === 'sword-8',
+        'An urgent feed should still preserve the pairs when the eight is available.');
+      expect(planned.diagnostics.candidates[0].score < choose(urgent).diagnostics.candidates[0].score,
+        'Large opposing hands should reduce the urgency of feeding a single.');
+      const wished = { ...deal, turnState: { ...deal.turnState, wishRank: '5' } };
+      expect(choose(wished).decision.cards.some(card => card.rank === '5'), 'The wish must still be honored.');
+      const finishing = makeDeal({ currentSeat: seat, hands: { ...hands, [seat]: [standardCard('sword', '8')] } });
+      expect(choose(finishing).decision.cards.length === 1, 'The bot must still take its own immediate finish.');
+    },
+  },
+  {
     name: 'optional reply protection can pass to keep a pair or straight intact',
     run() {
       const [, bot, opponent] = seats;

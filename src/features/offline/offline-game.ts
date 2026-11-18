@@ -138,6 +138,7 @@ export type FairBotSettings = {
   finishWithDragonLead?: boolean;
   preserveLateControl?: boolean;
   delayDogLead?: boolean;
+  partnerFinishPlanning?: boolean;
   opponentReplyThreshold?: number;
   replyPlayPenalty?: (move: OfflineLegalMove) => number;
 };
@@ -918,10 +919,14 @@ function scoreBotMove(deal: HeuristicView, seat: OfflineSeat, move: OfflineLegal
     }
 
     if (leadFinishesTeammate) {
-      score += 380;
+      const activeOpponents = opponentSeatsFor(seat).filter(opponent => deal.handCounts[opponent] > 0);
+      const moreSingleOpportunities = settings.partnerFinishPlanning &&
+        deal.handCounts[teammateSeat(seat)] === 1 && move.combo.type === 'single' &&
+        activeOpponents.length > 0 && activeOpponents.every(opponent => deal.handCounts[opponent] >= 6);
+      score += moreSingleOpportunities ? 140 : 380;
     }
 
-    if (quietLead) {
+    if (quietLead || (leadFinishesTeammate && settings.partnerFinishPlanning)) {
       score += quietLeadScore(hand, move, remainingHand, settings.strandedStraightCardPenalty ?? 0);
     }
 
@@ -1352,13 +1357,13 @@ function chooseOfflineBotDecision(deal: OfflineDeal, seat: OfflineSeat, settings
 type LiveBotOptions = Pick<FairBotSettings,
   'strandedStraightCardPenalty' | 'finishWithDragonLead' | 'preserveLateControl' | 'delayDogLead' |
   'phoenixLooseSinglesPenalty' | 'preserveControlAfterPartnerFinishes' | 'strandedSinglesPenalty' |
-  'splitReplyPenalty' | 'strandedLowCardPenalty'>;
+  'splitReplyPenalty' | 'strandedLowCardPenalty' | 'partnerFinishPlanning'>;
 
 export function liveOfflineSettingsForView(
   { turnState, hand, handCounts }: OfflineBotObservation,
   { strandedStraightCardPenalty = 8, finishWithDragonLead = true, preserveLateControl = true,
     delayDogLead = true, phoenixLooseSinglesPenalty = 0, preserveControlAfterPartnerFinishes = false,
-    strandedSinglesPenalty, splitReplyPenalty, strandedLowCardPenalty }: LiveBotOptions = {},
+    strandedSinglesPenalty, splitReplyPenalty, strandedLowCardPenalty, partnerFinishPlanning = true }: LiveBotOptions = {},
 ) {
   const winner = turnState?.currentWinningSeat;
   const challengeBonus = winner && handCounts[winner] <= 3 ? 95 : 0;
@@ -1373,6 +1378,7 @@ export function liveOfflineSettingsForView(
     strandedSinglesPenalty,
     splitReplyPenalty,
     strandedLowCardPenalty,
+    partnerFinishPlanning,
     replyPlayPenalty: move => {
       const leavesOnePlayFinish = hand.length - move.cards.length >= 3 &&
         validatePlay(remainingCardsAfterMove(hand, move), null).valid;
