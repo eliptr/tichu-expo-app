@@ -329,6 +329,7 @@ function* configuredOfflineBot(
     phoenixLooseSinglesPenalty: experiments.extraPhoenixProtection ? 120 : 0,
     strandedSinglesPenalty: experiments.exitProtection ? exitProtectionPenalty : undefined,
     strandedLowCardPenalty: experiments.protectLowCards ? lowCardProtectionPenalty : undefined,
+    reserveOneHighCard: experiments.reserveOneHighCard === true,
   };
   const heuristic = () => chooseLiveOfflineBot(deal, seat, options);
   const result = experiments.endgameSearch
@@ -337,7 +338,8 @@ function* configuredOfflineBot(
         fallback: heuristic,
       })
     : heuristic();
-  if (experiments.extraPhoenixProtection || experiments.exitProtection || experiments.protectLowCards || experiments.endgameSearch) {
+  if (experiments.extraPhoenixProtection || experiments.exitProtection || experiments.protectLowCards ||
+      experiments.reserveOneHighCard || experiments.endgameSearch) {
     result.diagnostics.experiments = { ...experiments };
   }
   return result;

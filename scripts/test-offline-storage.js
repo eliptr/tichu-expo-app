@@ -9,12 +9,19 @@ const filename = require('node:path').resolve(__dirname, '../src/features/offlin
 const moduleUnderTest = new Module(filename);
 moduleUnderTest.require = () => ({ __esModule: true, default: storage });
 moduleUnderTest._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, filename);
-const { loadOfflineSave, saveOfflineGame } = moduleUnderTest.exports;
+const { loadOfflineSave, normalizeOfflineBotExperiments, saveOfflineGame } = moduleUnderTest.exports;
 (async () => {
   assert.equal(await loadOfflineSave(), null);
   const save = { version: 1, deal: { hands: {}, humanHand: [], plays: [], botDiagnostics: { reason: 'test' } }, targetScore: 500, matchScores: { teamOne: 20, teamTwo: 80 }, handNumber: 2, scoredHandNumber: 1, botDelay: 650, showDiagnostics: true };
   await saveOfflineGame(save);
   assert.deepEqual(await loadOfflineSave(), save);
+  assert.equal(normalizeOfflineBotExperiments().reserveOneHighCard, false);
+  assert.equal(normalizeOfflineBotExperiments({ extraPhoenixProtection: false, endgameSearch: false }).reserveOneHighCard, false);
+  for (const reserveOneHighCard of [true, false]) {
+    const settings = normalizeOfflineBotExperiments({ extraPhoenixProtection: false, endgameSearch: false, reserveOneHighCard });
+    await saveOfflineGame({ ...save, botExperiments: settings });
+    assert.deepEqual(normalizeOfflineBotExperiments((await loadOfflineSave()).botExperiments), settings);
+  }
   await Promise.all([saveOfflineGame(save), saveOfflineGame({ ...save, handNumber: 3 })]);
   assert.equal((await loadOfflineSave()).handNumber, 3);
   fail = true;

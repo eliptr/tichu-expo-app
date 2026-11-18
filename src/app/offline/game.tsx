@@ -419,6 +419,12 @@ export default function OfflineBotGameScreen() {
             onValueChange={protectLowCards => setBotExperiments(settings => ({ ...settings, protectLowCards }))} />
         </View>
         <View style={styles.botSwitchRow}>
+          <Text style={styles.botDiagnosticsTitle}>Keep one high reserve</Text>
+          <Switch accessibilityLabel="Keep one high reserve" disabled={!hydrated}
+            value={botExperiments.reserveOneHighCard === true}
+            onValueChange={reserveOneHighCard => setBotExperiments(settings => ({ ...settings, reserveOneHighCard }))} />
+        </View>
+        <View style={styles.botSwitchRow}>
           <Text style={styles.botDiagnosticsTitle}>Endgame search</Text>
           <Switch accessibilityLabel="Endgame search" disabled={!hydrated}
             value={botExperiments.endgameSearch}

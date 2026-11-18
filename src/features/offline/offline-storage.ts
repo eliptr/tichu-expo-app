@@ -18,6 +18,7 @@ export function normalizeOfflineBotExperiments(settings?: OfflineBotExperiments)
     extraPhoenixProtection: settings?.extraPhoenixProtection === true,
     exitProtection: settings?.exitProtection === true,
     protectLowCards: settings?.protectLowCards === true,
+    reserveOneHighCard: settings?.reserveOneHighCard === true,
     endgameSearch: settings?.endgameSearch === true,
   };
 }

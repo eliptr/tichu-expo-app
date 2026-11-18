@@ -67,7 +67,8 @@ function playHand(seed, lineup, swapped, iterations) {
   if (!deal.scoreSummary && !failure) failure = { kind: 'stuck', turns };
   const scores = deal.scoreSummary && [deal.scoreSummary.teamOneScore, deal.scoreSummary.teamTwoScore];
   const oneTwoTeam = deal.scoreSummary?.oneTwoTeam ?? null;
-  return { seed, swapped, bots: lineup.map(bot => bot.version), scores, oneTwoTeam, turns, failure,
+  return { seed, swapped, bots: lineup.map(bot => bot.version), scores, oneTwoTeam,
+    finishOrder: deal.scoreSummary ? [...deal.finishOrder] : null, turns, failure,
     decisionTimes, searchTimes, searchResults };
 }
 

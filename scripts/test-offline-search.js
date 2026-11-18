@@ -149,6 +149,24 @@ function verifyInformationBoundary() {
   assert.deepEqual(incomplete.decision, chooseLiveOfflineBot(deal, seat, { phoenixLooseSinglesPenalty: 120 }).decision);
   assert.deepEqual(chooseConfiguredOfflineBot(deal, seat, { extraPhoenixProtection: false, endgameSearch: false }),
     chooseLiveOfflineBot(deal, seat));
+  for (const extraPhoenixProtection of [false, true]) {
+    for (const endgameSearch of [false, true]) {
+      const reserveSettings = { extraPhoenixProtection, endgameSearch, reserveOneHighCard: true };
+      const searchOptions = { iterations: 8, budgetMs: Infinity, random: seededRandom(7) };
+      const reserved = chooseConfiguredOfflineBot(deal, seat, reserveSettings, searchOptions);
+      assert.equal(reserved.diagnostics.experiments.reserveOneHighCard, true);
+      assert.notStrictEqual(applyOfflineMove(deal, seat, reserved.decision), deal);
+      const timedReserve = chooseConfiguredOfflineBot(deal, seat, reserveSettings, { budgetMs: 0 });
+      assert.deepEqual(timedReserve.decision, chooseLiveOfflineBot(deal, seat,
+        { phoenixLooseSinglesPenalty: extraPhoenixProtection ? 120 : 0, reserveOneHighCard: true }).decision);
+      if (endgameSearch) {
+        const otherReserved = chooseConfiguredOfflineBot({ ...deal, hands }, seat, reserveSettings,
+          { iterations: 8, budgetMs: Infinity, random: seededRandom(7) });
+        assert.deepEqual(reserved.decision, otherReserved.decision);
+        assert.deepEqual(reserved.diagnostics.candidates, otherReserved.diagnostics.candidates);
+      }
+    }
+  }
   console.log('PASS hidden-hand invariance, exchange constraints, deck conservation, legal search and fallback');
 }
 

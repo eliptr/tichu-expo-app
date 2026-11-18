@@ -50,6 +50,7 @@ export type OfflineBotExperiments = {
   extraPhoenixProtection: boolean;
   exitProtection?: boolean;
   protectLowCards?: boolean;
+  reserveOneHighCard?: boolean;
   endgameSearch: boolean;
 };
 
@@ -139,8 +140,11 @@ export type FairBotSettings = {
   preserveLateControl?: boolean;
   delayDogLead?: boolean;
   partnerFinishPlanning?: boolean;
+  reserveOneHighCard?: boolean;
   opponentReplyThreshold?: number;
   replyPlayPenalty?: (move: OfflineLegalMove) => number;
+  // Local experiments may adjust every play; absent in the app's settings.
+  moveScorePenalty?: (move: OfflineLegalMove) => number;
 };
 
 export const liveOfflineBotSettings: FairBotSettings = { protectTrickWinners: true };
@@ -1053,7 +1057,7 @@ function scoreBotMove(deal: HeuristicView, seat: OfflineSeat, move: OfflineLegal
     }
   }
 
-  return score;
+  return score - (settings.moveScorePenalty?.(move) ?? 0);
 }
 
 export function withOfflineBotWish(view: OfflineBotObservation, move: OfflineLegalMove): OfflineLegalMove {
@@ -1231,12 +1235,44 @@ export function isOptionalOfflineReply(view: OfflineBotObservation, actions: Off
     !actions.some(move => move.action === 'play' && move.cards.length === view.hand.length);
 }
 
+function isHighReserveCard(card: TichuCard) {
+  return card.id === 'phoenix' || card.id === 'dragon' || cardRankValue(card) >= 12;
+}
+
+function highReserveActions(view: OfflineBotObservation, actions: OfflineSimulationMove[]) {
+  const finish = actions.find(move => move.action === 'play' && move.cards.length === view.hand.length);
+  if (finish) return [finish];
+  const urgent = seats.some(seat => teamForSeat(seat) !== teamForSeat(view.seat) && view.handCounts[seat] === 1);
+  if (urgent || view.turnState.wishRank) return actions;
+
+  let candidates = actions.filter(move => {
+    if (move.action === 'pass' || !move.cards.some(isHighReserveCard)) return true;
+    const remaining = remainingCardsAfterMove(view.hand, move);
+    if (remaining.some(isHighReserveCard)) return true;
+    const lowerCards = remaining.filter(card => !isHighReserveCard(card));
+    return lowerCards.length < 3 || validatePlay(lowerCards, null).valid;
+  });
+  // A lead is still required when every available play would spend the reserve.
+  if (!candidates.length) candidates = actions;
+  if (view.turnState.currentWinningSeat === null && view.hand.some(isHighReserveCard)) {
+    const lowerPlays = candidates.filter((move): move is OfflineLegalMove =>
+      move.action === 'play' && move.cards.every(card => !isHighReserveCard(card)));
+    if (lowerPlays.length) {
+      const largest = Math.max(...lowerPlays.map(move => move.cards.length));
+      candidates = lowerPlays.filter(move => move.cards.length === largest);
+    }
+  }
+  return candidates;
+}
+
 function chooseHeuristicDecision(
   deal: HeuristicView,
   actions = legalOfflineBotActions(deal),
   settings: FairBotSettings = {},
   onRankedPlays?: (moves: OfflineLegalMove[]) => void,
 ): { decision: OfflineBotDecision; diagnostics: OfflineBotDiagnostics } {
+  const originalActions = actions;
+  if (settings.reserveOneHighCard) actions = highReserveActions(deal, actions);
   const { seat } = deal;
   const winningPlay = currentWinningPlay(deal);
   const currentCombo = winningPlay?.combo ?? null;
@@ -1264,7 +1300,9 @@ function chooseHeuristicDecision(
   onRankedPlays?.(moves);
 
   if (moves.length === 0) {
-    return passDecision(deal, seat, 'No legal move can beat the current table.');
+    return passDecision(deal, seat, actions !== originalActions && originalActions.some(move => move.action === 'play')
+      ? 'Passing keeps one high reserve while several lower plays remain.'
+      : 'No legal move can beat the current table.');
   }
 
   if (deal.turnState?.wishRank && moves.some((move) => cardsContainWishRank(move.cards, deal.turnState?.wishRank ?? null))) {
@@ -1357,13 +1395,14 @@ function chooseOfflineBotDecision(deal: OfflineDeal, seat: OfflineSeat, settings
 type LiveBotOptions = Pick<FairBotSettings,
   'strandedStraightCardPenalty' | 'finishWithDragonLead' | 'preserveLateControl' | 'delayDogLead' |
   'phoenixLooseSinglesPenalty' | 'preserveControlAfterPartnerFinishes' | 'strandedSinglesPenalty' |
-  'splitReplyPenalty' | 'strandedLowCardPenalty' | 'partnerFinishPlanning'>;
+  'splitReplyPenalty' | 'strandedLowCardPenalty' | 'partnerFinishPlanning' | 'reserveOneHighCard'>;
 
 export function liveOfflineSettingsForView(
   { turnState, hand, handCounts }: OfflineBotObservation,
   { strandedStraightCardPenalty = 8, finishWithDragonLead = true, preserveLateControl = true,
     delayDogLead = true, phoenixLooseSinglesPenalty = 0, preserveControlAfterPartnerFinishes = false,
-    strandedSinglesPenalty, splitReplyPenalty, strandedLowCardPenalty, partnerFinishPlanning = true }: LiveBotOptions = {},
+    strandedSinglesPenalty, splitReplyPenalty, strandedLowCardPenalty, partnerFinishPlanning = true,
+    reserveOneHighCard = false }: LiveBotOptions = {},
 ) {
   const winner = turnState?.currentWinningSeat;
   const challengeBonus = winner && handCounts[winner] <= 3 ? 95 : 0;
@@ -1379,6 +1418,7 @@ export function liveOfflineSettingsForView(
     splitReplyPenalty,
     strandedLowCardPenalty,
     partnerFinishPlanning,
+    reserveOneHighCard,
     replyPlayPenalty: move => {
       const leavesOnePlayFinish = hand.length - move.cards.length >= 3 &&
         validatePlay(remainingCardsAfterMove(hand, move), null).valid;

@@ -45,7 +45,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "test:offline-bots": "node ./scripts/run-offline-bot-scenarios.js && node ./scripts/test-offline-search.js",
+    "test:offline-bots": "node ./scripts/run-offline-bot-scenarios.js && node ./scripts/test-offline-search.js && node ./scripts/test-control-reserve.js",
     "self-play": "node ./scripts/run-offline-self-play.js",
     "experiment:phoenix": "node ./scripts/run-phoenix-experiment.js",
     "train:heuristic": "node ./scripts/train-offline-heuristic.js",

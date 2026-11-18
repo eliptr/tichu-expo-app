@@ -24,6 +24,10 @@ const { capturePosition, loadPositionReports, storePositionReport, removePositio
   }, before);
   assert.equal(searchReport.engineVersion, 'ismcts-v1');
   assert.equal(JSON.parse(exportPositionReport(searchReport)).position.deal.botDiagnostics.search.iterations, 64);
+  const reserveReport = capturePosition({ ...position, botExperiments: {
+    extraPhoenixProtection: false, endgameSearch: false, reserveOneHighCard: true,
+  } }, before);
+  assert.equal(JSON.parse(exportPositionReport(reserveReport)).position.botExperiments.reserveOneHighCard, true);
   position.deal.hands.one[0].id = 'changed'; before.hands.one.length = 0;
   assert.equal(report.position.deal.hands.one[0].id, 'jade-2');
   assert.equal(report.beforeLastBotMove.hands.one.length, 1);
